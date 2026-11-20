@@ -33,8 +33,6 @@ var (
 	localDaemon = localhost + ":" + fmt.Sprintf("%d", wireutil.GRPCDefaultPort)
 )
 
-var interNodeLinkType = wireutil.INTER_NODE_LINK_VXLAN
-
 type netConf struct {
 	types.NetConf
 	Delegate map[string]interface{} `json:"delegate"`
@@ -332,14 +330,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 			} else { // This means we're on different hosts
 				log.Infof("Add[%s]: %s@%s and %s@%s are on different hosts", string(cniArgs.K8S_POD_NAME), localPod.Name, localPod.SrcIp, peerPod.Name, peerPod.SrcIp)
-				if interNodeLinkType == wireutil.INTER_NODE_LINK_GRPC {
-					err = CreatGRPCChan(link, localPod, peerPod, meshnetClient, &cniArgs, ctx)
-					if err != nil {
-						log.Errorf("Add[%s]: !! Failed to create grpc wire. err: %v", string(cniArgs.K8S_POD_NAME), err)
-						return err
-					}
-					continue
-				}
 				// Creating koko's Vxlan struct
 				vxlan := makeVxlan(srcIntf, peerPod.SrcIp, link.Uid)
 				// Checking if interface already exists
@@ -450,18 +440,6 @@ func cmdDel(args *skel.CmdArgs) error {
 		return nil
 	}
 
-	/* Tell daemon to close the grpc tunnel for this pod netns (if any) */
-	log.Infof("Del: Retrieving pod's metadata from meshnet daemon")
-	wireDef := mpb.WireDef{
-		TopoNs:       string(cniArgs.K8S_POD_NAMESPACE),
-		LocalPodName: string(cniArgs.K8S_POD_NAME),
-	}
-
-	removResp, err := meshnetClient.RemGRPCWire(ctx, &wireDef)
-	if err != nil || !removResp.Response {
-		return fmt.Errorf("del: could not remove grpc wire: %v", err)
-	}
-
 	localPodSrcIp := localPod.SrcIp
 	log.Infof("Del: Topology data still exists in CRs, cleaning up it's status")
 	// By setting srcIP and NetNS to "" we're marking this POD as dead
@@ -476,27 +454,14 @@ func cmdDel(args *skel.CmdArgs) error {
 	log.Infof("Del: Iterating over each link for clean-up")
 	for _, link := range localPod.Links { // Iterate over each link of the local pod
 		linkType := "veth"
-		// Initialising peer pod's metadata. Peer pod information is needed to determine if a link is of type GRPC or VxLAN.
-		// For GRPC link type there is some addtional cleanup work nedd to be perfromed.
+		// The peer tells whether the link was a veth or a vxlan, which only matters for the log.
 		log.Infof("Del: Pod %s is retrieving peer pod %s information from meshnet daemon", string(cniArgs.K8S_POD_NAME), link.PeerPod)
 		peerPod, _ := meshnetClient.Get(ctx, &mpb.PodQuery{
-			Name:   link.PeerPod, // getting peer pod detail.
+			Name:   link.PeerPod,
 			KubeNs: string(cniArgs.K8S_POD_NAMESPACE),
 		})
-
-		if peerPod.SrcIp != localPodSrcIp {
-			// they are on different hosts
-			if interNodeLinkType == wireutil.INTER_NODE_LINK_GRPC {
-				// for this link bring the grpc wire down
-				err = MakeGRPCChanDown(link, localPod, peerPod, ctx)
-				if err != nil {
-					log.Errorf("Del: !! Failed to remove remote grpc wire. err: %v", err)
-					// no return
-				}
-				linkType = "grpc"
-			} else {
-				linkType = "vxlan"
-			}
+		if peerPod != nil && peerPod.SrcIp != localPodSrcIp {
+			linkType = "vxlan"
 		}
 		// Creating koko's Veth struct for local intf
 		myVeth, err := makeVeth(args.Netns, link.LocalIntf, link.LocalIp)
@@ -528,30 +493,12 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-func SetInterNodeLinkType() {
-	// TODO: Find a more appropriate (if any) way to figure out intended link type
-	// As of today, daemon gets the intended link type from env INTER_NODE_LINK_TYPE
-	// which is set by deployment file. The daemon further propagates this to plugin
-	// via means of file on host (which is read below) containing the value GRPC or VXLAN
-	b, err := os.ReadFile("/etc/cni/net.d/meshnet-inter-node-link-type")
-	if err != nil {
-		log.Warningf("Could not read iner node link type: %v", err)
-		// use the default value
-		return
-	}
-
-	interNodeLinkType = string(b)
-}
-
 // -------------------------------------------------------------------------------------------------
 func main() {
 	fp, err := os.OpenFile("/var/log/meshnet-cni.log", os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
 	if err == nil {
 		log.SetOutput(fp)
 	}
-
-	SetInterNodeLinkType()
-	log.Infof("INTER_NODE_LINK_TYPE: %v", interNodeLinkType)
 
 	retCode := 0
 	e := skel.PluginMainWithError(cmdAdd, cmdGet, cmdDel, version.All, "CNI plugin meshnet v0.3.0")

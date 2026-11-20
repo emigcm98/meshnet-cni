@@ -1,13 +1,14 @@
 package cni
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/containernetworking/cni/libcni"
 	"github.com/containernetworking/cni/pkg/types"
@@ -17,7 +18,6 @@ import (
 const (
 	defaultNetDir     = "/etc/cni/net.d"
 	defaultCNIFile    = "00-meshnet.conflist"
-	interNodeLinkConf = "/etc/cni/net.d/meshnet-inter-node-link-type"
 	defaultPluginName = "meshnet"
 )
 
@@ -93,26 +93,32 @@ func saveConfList(m map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(meshnetCNIPath, bytes, os.FileMode(06444))
+	return os.WriteFile(meshnetCNIPath, bytes, os.FileMode(06444))
 }
 
-func saveInterNodeLinkConf() error {
-	return ioutil.WriteFile(interNodeLinkConf, []byte(os.Getenv("INTER_NODE_LINK_TYPE")), os.FileMode(06444))
-}
-
-func removeInterNodeLinkConf() error {
-	if err := os.Remove(interNodeLinkConf); err != nil {
-		return fmt.Errorf("failed to remove %s: %v", interNodeLinkConf, err)
-	}
-	return nil
-}
-
-// Init installs meshnet CNI configuration
-func Init() error {
-
-	conf, err := loadConfList()
-	if err != nil {
-		return err
+// Init installs meshnet CNI configuration. The daemon usually starts next to the
+// primary CNI, which may not have left its configuration yet, so it waits for one
+// instead of dying; the wait follows KNE's daemon/cni/cni.go.
+func Init(ctx context.Context) error {
+	var (
+		conf map[string]interface{}
+		err  error
+	)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for attempts := 0; ; attempts++ {
+		conf, err = loadConfList()
+		if err == nil {
+			break
+		}
+		if attempts%10 == 0 {
+			log.Infof("Waiting for the primary CNI configuration in %s: %v", defaultNetDir, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("gave up waiting for the primary CNI configuration: %w", ctx.Err())
+		case <-ticker.C:
+		}
 	}
 
 	// We can safely access and type-cast since all of the checks have already been done in the `loadConfList()`
@@ -126,11 +132,6 @@ func Init() error {
 	conf["cniVersion"] = "0.3.0"
 	conf["plugins"] = plugins
 
-	// TODO: check if we can avoid creating a custom file for propagating value of env INTER_NODE_LINK_TYPE
-	if err := saveInterNodeLinkConf(); err != nil {
-		return err
-	}
-
 	return saveConfList(conf)
 }
 
@@ -138,8 +139,5 @@ func Init() error {
 func Cleanup() {
 	if err := os.Remove(meshnetCNIPath); err != nil {
 		log.Infof("Failed to remove file %s: %v", meshnetCNIPath, err)
-	}
-	if err := removeInterNodeLinkConf(); err != nil {
-		log.Infof("Failed to remove inter node link conf: %v", err)
 	}
 }

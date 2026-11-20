@@ -14,7 +14,9 @@ All notable changes to this project are documented in this file. The format foll
 ### Fixed
 
 - `make install` and `make uninstall` use the kustomize the Makefile installs instead of one expected on the PATH.
+- `meshnetd` waits for the primary CNI to leave its configuration instead of exiting when it starts first, stops on SIGTERM so its cleanup runs, and the DaemonSet is Ready only once meshnet is chained into the node's CNI configuration.
 
 ### Removed
 
 - The Docker Hub release, the kops overlay, the old entrypoint, the proto generation stage of the image and the material of the original README.
+- The gRPC wires (`daemon/grpcwire`, their CRD, overlays, RPCs and docs, and `INTER_NODE_LINK_TYPE`): a userspace datapath measured at 20 Mbit/s and 13 ms where VXLAN gives 10 Gbit/s and 0.23 ms. Without libpcap `meshnetd` is a static binary and the image runs on busybox.

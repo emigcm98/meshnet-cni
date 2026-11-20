@@ -7,10 +7,8 @@ require (
 	github.com/containernetworking/plugins v1.9.1
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/google/go-cmp v0.7.0
-	github.com/google/gopacket v1.1.19
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.4
 	github.com/h-fam/errdiff v1.0.2
-	github.com/openconfig/gnmi v0.14.1
 	github.com/redhat-nfvpe/koko v0.0.0-20210415181932-a18aa44814ea
 	github.com/safchain/ethtool v0.7.0
 	github.com/sirupsen/logrus v1.10.2
