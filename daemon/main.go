@@ -49,6 +49,8 @@ func main() {
 	}
 	log.Info("Starting meshnet daemon...")
 
+	go m.RunControllerLoop(ctx)
+
 	// A SIGTERM from the kubelet stops the server so the deferred cleanup runs.
 	go func() {
 		<-ctx.Done()

@@ -1,4 +1,5 @@
-// Ported from openconfig/kne, third_party/meshnet/utils/wireutil/veth.go at 5a1676c (Apache 2.0).
+// Ported from openconfig/kne, third_party/meshnet/utils/wireutil/veth.go at 5a1676c (Apache 2.0),
+// with the pod's end of an old pair replaced when the peer has made a new one.
 
 package wireutil
 
@@ -108,14 +109,32 @@ func ConfigurePodLinks(podNsPath string, links []PodLinkConfig) error {
 	for _, cfg := range links {
 		localHostName, peerHostName := HostVethNames(cfg.KubeNs, cfg.PodName, cfg.PeerPodName, cfg.LinkUID)
 
+		// Check if localHostName is already waiting on the host (created by peer pod or previous run).
+		localLink, err := netlink.LinkByName(localHostName)
+
+		// An end waiting under this pod's name means the peer made a new pair, which it only does once
+		// its own end of the old one is gone; the interface this pod still holds belongs to the old pair
+		// (a peer recreated on this node before its old sandbox was torn down), so it makes room.
+		if err == nil && existingInContainer[cfg.LocalIntf] {
+			stale := cfg.LocalIntf
+			if delErr := podNs.Do(func(_ ns.NetNS) error {
+				if l, err := netlink.LinkByName(stale); err == nil {
+					return netlink.LinkDel(l)
+				}
+				return nil
+			}); delErr != nil {
+				return fmt.Errorf("failed to remove %s of an old pair from netns %s: %w", stale, podNsPath, delErr)
+			}
+			log.Infof("ConfigurePodLinks: replaced %s in %s, its peer made a new pair", stale, podNsPath)
+			existingInContainer[cfg.LocalIntf] = false
+		}
+
 		// If either the target name (LocalIntf) or temporary name (localHostName) is already in podNs,
 		// the interface has already been moved inside.
 		if existingInContainer[cfg.LocalIntf] || existingInContainer[localHostName] {
 			continue
 		}
 
-		// Check if localHostName is already waiting on the host (created by peer pod or previous run).
-		localLink, err := netlink.LinkByName(localHostName)
 		if err != nil {
 			// Not on host -> create the host veth pair.
 			mtu := cfg.MTU

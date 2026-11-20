@@ -21,7 +21,7 @@ test:
 
 ## Run the tests that need network namespaces of their own, as root
 test-root:
-	sudo env "PATH=$$PATH" go test -count=1 ./utils/wireutil/... ./daemon/vxlan/...
+	sudo env "PATH=$$PATH" go test -count=1 ./utils/wireutil/... ./daemon/...
 
 # Build local binaries
 local-build:

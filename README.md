@@ -4,6 +4,12 @@
 
 This is the fork that [KubeNDT](https://github.com/emigcm98/kubendt) runs. It descends from the archived [networkop/meshnet-cni](https://github.com/networkop/meshnet-cni) (BSD 3-Clause, Michael Kashin) and takes pieces from the fork maintained inside [openconfig/kne](https://github.com/openconfig/kne/tree/main/third_party/meshnet) (Apache 2.0), each attributed in the commit that brings it. The CNI binary, the NetworkAttachmentDefinition and the CRD keep their original names, so topologies written for the original line work unchanged.
 
+## How it works
+
+The `meshnet` binary is a chained CNI plugin: when a pod with a `Topology` starts, it tells the local `meshnetd` the pod's network namespace and node address, then waits up to 30 s for the pod's interfaces. `meshnetd` runs on every node and watches the `Topology` resources; it reconciles a local pod when the pod or one of its peers changes and once a minute, creating what is missing and replacing what is of the wrong kind, so a pod that moves to another node, or a link deleted by hand, is rewired without a restart. The error of the last reconcile, if any, is in the pod's `status.plumbing_error`. An interface the workload shuts down stays down.
+
+`LINK_MTU` on the DaemonSet sets the MTU of links that do not ask for one, and `LINK_TXQUEUELEN` the queue length of every link end (10000 by default).
+
 ## Topology
 
 One `Topology` per pod, in the pod's namespace, listing its links. The `uid` identifies the link on both ends and is the VXLAN VNI when the link crosses nodes; the addresses are optional.
@@ -23,7 +29,7 @@ spec:
     peer_ip: 12.12.12.2/24
 ```
 
-A link whose `peer_pod` is `localhost` is a macvlan on the node interface named by `peer_intf`. `tests/` holds topologies for two, three and five nodes, one with several links between the same pair, and the macvlan case.
+A link whose `peer_pod` is `localhost` is a macvlan on the node interface named by `peer_intf`. An optional `mtu` sets the MTU of a link; both ends get the larger of the two requests. The `uid` must be unique on a node across namespaces, since the kernel refuses a second VXLAN with a VNI already in use. `tests/` holds topologies for two, three and five nodes, one with several links between the same pair, and the macvlan case.
 
 ## Install
 

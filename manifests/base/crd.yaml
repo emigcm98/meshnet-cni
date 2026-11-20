@@ -41,13 +41,17 @@ spec:
                     local_ip:
                       description: '(Optional) Peer IP address'
                       type: string
+                    mtu:
+                      description: '(Optional) MTU of the link; both ends get the larger of the two requests'
+                      type: integer
+                      minimum: 0
                   type: object
                 type: array
             type: object
           status:
             properties:
               skipped:
-                description: 'List of pods/interfaces that are skipped by local pod'
+                description: 'List of pods/interfaces that are skipped by local pod (deprecated, the daemon reconcile no longer reads it)'
                 items:
                   properties:
                     link_id:
@@ -66,6 +70,9 @@ spec:
                 type: string
               container_id:
                 description: 'Sandbox ID of the POD'
+                type: string
+              plumbing_error:
+                description: 'The error of the last reconcile of the pod links, empty when they are wired'
                 type: string
             type: object
         type: object
