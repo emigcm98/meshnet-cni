@@ -1,0 +1,23 @@
+// Ported from openconfig/kne, third_party/meshnet/utils/wireutil/sys_tune.go at 5a1676c (Apache 2.0).
+
+package wireutil
+
+import (
+	"os"
+	"strconv"
+)
+
+// GetEnvInt reads an integer environment variable with a default fallback value if unset or invalid.
+func GetEnvInt(key string, defaultVal int) int {
+	if valStr := os.Getenv(key); valStr != "" {
+		if val, err := strconv.Atoi(valStr); err == nil && val > 0 {
+			return val
+		}
+	}
+	return defaultVal
+}
+
+// GetLinkTxQLen returns the configured link txqueuelen (default 10000, configurable via LINK_TXQUEUELEN).
+func GetLinkTxQLen() int {
+	return GetEnvInt("LINK_TXQUEUELEN", 10000)
+}
