@@ -18,10 +18,10 @@ import (
 	"fmt"
 	"testing"
 
+	topologyv1 "github.com/emigcm98/meshnet-cni/api/types/v1beta1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/h-fam/errdiff"
-	topologyv1 "github.com/networkop/meshnet-cni/api/types/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -218,7 +218,7 @@ func TestList(t *testing.T) {
 			if tt.wantErr != "" {
 				return
 			}
-			if s := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(topologyv1.TopologyList{}, "TypeMeta")); s != "" {
+			if s := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(topologyv1.TopologyList{}, "TypeMeta", "ListMeta")); s != "" {
 				t.Fatalf("List() failed: %s", s)
 			}
 		})
@@ -404,7 +404,7 @@ func TestUnstructured(t *testing.T) {
 			}
 			uObj1 := &topologyv1.Topology{}
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(got.Object, uObj1); err != nil {
-				t.Fatalf("failed to turn reponse into a topology: %v", err)
+				t.Fatalf("failed to turn response into a topology: %v", err)
 			}
 			if s := cmp.Diff(uObj1, tt.want); s != "" {
 				t.Fatalf("Unstructured(%q) failed: %s", tt.in, s)

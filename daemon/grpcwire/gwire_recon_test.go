@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
+	grpcwirev1 "github.com/emigcm98/meshnet-cni/api/types/v1beta1"
 	"github.com/google/go-cmp/cmp"
-	grpcwirev1 "github.com/networkop/meshnet-cni/api/types/v1beta1"
 	"github.com/vishvananda/netlink"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
