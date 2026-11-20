@@ -19,11 +19,6 @@ lint:
 test:
 	go test ./...
 
-## Run unit tests for Reconciliation
-recon-test:
-	sudo go test -count=1 -v -run '' github.com/emigcm98/meshnet-cni/daemon/grpcwire
-	#sudo go test -count=1 -run '' github.com/emigcm98/meshnet-cni/daemon/grpcwire
-
 # Build local binaries
 local-build:
 	CGO_ENABLED=0 GOOS=linux go build -o meshnet github.com/emigcm98/meshnet-cni/plugin 
@@ -92,20 +87,12 @@ wait-for-meshnet:
 .PHONY: install
 ## Install meshnet into a test cluster
 install: kind-load kind-wait-for-cni kustomize kind-connect
-ifdef grpc
-	$(GOPATH)/bin/kustomize build manifests/overlays/grpc-link-e2e | kubectl apply -f -
-else
 	$(GOPATH)/bin/kustomize build manifests/overlays/e2e | kubectl apply -f -
-endif
 
 .PHONY: uninstall
 ## Uninstall meshnet from a test cluster
 uninstall: kind-connect
-ifdef grpc
-	-$(GOPATH)/bin/kustomize build manifests/overlays/grpc-link-e2e | kubectl delete -f -
-else
 	-$(GOPATH)/bin/kustomize build manifests/overlays/e2e | kubectl delete -f -
-endif
 
 # From: https://gist.github.com/klmr/575726c7e05d8780505a
 help:

@@ -21,9 +21,8 @@ import (
 )
 
 const (
-	GroupName          = "networkop.co.uk"
-	GroupVersion       = "v1beta1"
-	GWireResNamePlural = "gwirekobjs"
+	GroupName    = "networkop.co.uk"
+	GroupVersion = "v1beta1"
 )
 
 var (

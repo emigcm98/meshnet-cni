@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 
 	"github.com/emigcm98/meshnet-cni/daemon/cni"
-	"github.com/emigcm98/meshnet-cni/daemon/grpcwire"
 	"github.com/emigcm98/meshnet-cni/daemon/meshnet"
 	"github.com/emigcm98/meshnet-cni/daemon/vxlan"
 	"github.com/emigcm98/meshnet-cni/utils/wireutil"
@@ -14,14 +16,16 @@ import (
 )
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
-	if err := cni.Init(); err != nil {
+	if err := cni.Init(ctx); err != nil {
 		log.Errorf("Failed to initialise CNI plugin: %v", err)
 		os.Exit(1)
 	}
 	defer cni.Cleanup()
 
-	isDebug := flag.Bool("d", false, "enable degugging")
+	isDebug := flag.Bool("d", false, "enable debugging")
 	grpcPort, err := strconv.Atoi(os.Getenv("GRPC_PORT"))
 	if err != nil || grpcPort == 0 {
 		grpcPort = wireutil.GRPCDefaultPort
@@ -34,7 +38,6 @@ func main() {
 	}
 
 	meshnet.InitLogger()
-	grpcwire.InitLogger()
 	vxlan.InitLogger()
 
 	m, err := meshnet.New(meshnet.Config{
@@ -44,17 +47,13 @@ func main() {
 		log.Errorf("failed to create meshnet: %v", err)
 		os.Exit(1)
 	}
-	log.Info("Starting meshnet daemon...with grpc support")
+	log.Info("Starting meshnet daemon...")
 
-	grpcwire.SetGWireClient(m.GWireDynClient)
-
-	// read grpcwire info (if any) from data store and update local db
-	err = grpcwire.ReconGWires()
-	if err != nil {
-		log.Errorf("could not reconcile grpc wire: %v", err)
-		// generate error and continue
-	}
-
+	// A SIGTERM from the kubelet stops the server so the deferred cleanup runs.
+	go func() {
+		<-ctx.Done()
+		m.Stop()
+	}()
 	if err := m.Serve(); err != nil {
 		log.Errorf("daemon exited badly: %v", err)
 		os.Exit(1)

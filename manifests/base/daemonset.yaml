@@ -29,6 +29,11 @@ spec:
           image: ghcr.io/emigcm98/meshnet:latest
           imagePullPolicy: IfNotPresent
           command: ["./entrypoint.sh"]
+          # Ready means the daemon has chained meshnet into the node's CNI configuration, not just started.
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/etc/cni/net.d/00-meshnet.conflist"]
+            periodSeconds: 2
           resources:
             limits:
               memory: 10G
@@ -40,9 +45,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
-            - name: INTER_NODE_LINK_TYPE
-              #value: GRPC
-              value: VXLAN
             - name: NODE_NAME
               valueFrom:
                 fieldRef:

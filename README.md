@@ -1,6 +1,6 @@
 # meshnet CNI
 
-**meshnet** is a Kubernetes CNI plugin that wires point-to-point links between pods from a topology stored in the cluster. Two pods on the same node get a veth pair, two pods on different nodes get a VXLAN tunnel (or a gRPC wire, see below), and a pod can be attached to an external device through a macvlan interface. Every pod keeps its first interface from the cluster's primary CNI; meshnet chains itself after it and only adds interfaces to pods that have a `Topology` resource.
+**meshnet** is a Kubernetes CNI plugin that wires point-to-point links between pods from a topology stored in the cluster. Two pods on the same node get a veth pair, two pods on different nodes get a VXLAN tunnel, and a pod can be attached to an external device through a macvlan interface. Every pod keeps its first interface from the cluster's primary CNI; meshnet chains itself after it and only adds interfaces to pods that have a `Topology` resource.
 
 This is the fork that [KubeNDT](https://github.com/emigcm98/kubendt) runs. It descends from the archived [networkop/meshnet-cni](https://github.com/networkop/meshnet-cni) (BSD 3-Clause, Michael Kashin) and takes pieces from the fork maintained inside [openconfig/kne](https://github.com/openconfig/kne/tree/main/third_party/meshnet) (Apache 2.0), each attributed in the commit that brings it. The CNI binary, the NetworkAttachmentDefinition and the CRD keep their original names, so topologies written for the original line work unchanged.
 
@@ -33,12 +33,12 @@ The manifests create the `meshnet` namespace, the CRD, the RBAC and a DaemonSet 
 kubectl apply -k "github.com/emigcm98/meshnet-cni/manifests/base?ref=v0.1.0"
 ```
 
-Images live at `ghcr.io/emigcm98/meshnet`: every `v*` tag publishes its version and `latest`, every merge to `master` publishes `sha-<commit>` for testing. The `manifests/overlays/grpc-link` overlay installs the daemon with `INTER_NODE_LINK_TYPE=GRPC`, which carries cross-node links over gRPC between daemons instead of VXLAN.
+Images live at `ghcr.io/emigcm98/meshnet`: every `v*` tag publishes its version and `latest`, every merge to `master` publishes `sha-<commit>` for testing.
 
 ## Develop
 
 ```sh
-make test        # go test ./..., needs libpcap-dev
+make test        # go test ./...
 make docker      # the image, tagged with the commit
 make up          # a local kind cluster of one control plane and three workers
 make install     # loads the image into it and applies manifests/overlays/e2e
