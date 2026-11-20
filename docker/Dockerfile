@@ -1,72 +1,26 @@
-# GRPC generation
-FROM golang:1.26-bookworm AS proto_base
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
+# The daemon links libpcap for the gRPC wires, so it is the one CGO binary.
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends libpcap-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY go.mod go.sum ./
+RUN go mod download
 
-COPY --from=bufbuild/buf:1.75.0 /usr/local/bin/buf /usr/local/bin/buf
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12 && \
-    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
-
-COPY daemon/proto .
-COPY buf.gen.yaml .
-COPY buf.yaml .
-
-RUN buf lint && buf generate -v
-
-#---------------------------------------------- Stage 2: Build Base : Build mesnet binraries (Plugin & daemon) - ---------------------------------
-# Building the binaries
-FROM golang:1.26-bookworm AS build_base
-
-
-WORKDIR /go/src/github.com/emigcm98/meshnet-cni
-ENV CGO_ENABLED=0
-COPY go.mod .
-COPY go.sum .
-RUN go mod download; \
-    apt-get update -y; \
-    apt-get install -y libpcap-dev; \
-    apt-get install -y libsystemd-dev;
- 
-    # apt-get install -y libmnl; \
-    # apt-get install -y libmnl-dev; \
-    # go get github.com/chamaken/cgolmnl
-
-FROM --platform=${BUILDPLATFORM:-linux/amd64} build_base AS build
-
-ARG LDFLAGS
-ARG TARGETOS
-ARG TARGETARCH
-
-COPY daemon/ daemon/
 COPY api/ api/
+COPY daemon/ daemon/
 COPY plugin/ plugin/
 COPY utils/ utils/
-COPY --from=proto_base /src/ .
-
-
-RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o meshnet plugin/meshnet.go plugin/grpcwires-plugin.go 
-RUN GOOS=${TARGETOS} CGO_ENABLED=1 GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o meshnetd daemon/main.go; 
-
-
-#----------------------------------------------------- Final Conatiner ---------------------------------
-# FROM alpine:latest
-# RUN apk update; \
-#     apk add --no-cache jq
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o meshnet ./plugin && \
+    CGO_ENABLED=1 go build -ldflags="-s -w" -o meshnetd ./daemon
 
 FROM ubuntu:24.04
-RUN apt-get update; \ 
-    apt-get install -y jq; \
-    apt-get install -y libpcap-dev
-
-# apt-get install -y libpcap-dev; \  
-
-COPY --from=build /go/src/github.com/emigcm98/meshnet-cni/meshnet /
-COPY --from=build /go/src/github.com/emigcm98/meshnet-cni/meshnetd /
-#COPY etc/cni/net.d/meshnet.conf /
-COPY docker/new-entrypoint.sh /entrypoint.sh
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libpcap0.8 && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/meshnet /src/meshnetd /
+COPY docker/entrypoint.sh /entrypoint.sh
 COPY LICENSE /
-RUN chmod +x ./entrypoint.sh
-RUN chmod +x /meshnetd
-#RUN mkdir /lib64 && ln -s /lib/libc.musl-x86_64.so.1 /lib64/ld-linux-x86-64.so.2
-
-ENTRYPOINT ./entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
