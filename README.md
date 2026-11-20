@@ -39,6 +39,7 @@ Images live at `ghcr.io/emigcm98/meshnet`: every `v*` tag publishes its version 
 
 ```sh
 make test        # go test ./...
+make test-root   # the tests that make network namespaces, as root
 make docker      # the image, tagged with the commit
 make up          # a local kind cluster of one control plane and three workers
 make install     # loads the image into it and applies manifests/overlays/e2e

@@ -37,7 +37,7 @@ type Meshnet struct {
 	lis     net.Listener
 }
 
-var mnetdLogger *log.Entry = nil
+var mnetdLogger = log.WithFields(log.Fields{"daemon": "meshnetd"})
 
 func InitLogger() {
 	mnetdLogger = log.WithFields(log.Fields{"daemon": "meshnetd"})

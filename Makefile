@@ -19,6 +19,10 @@ lint:
 test:
 	go test ./...
 
+## Run the tests that need network namespaces of their own, as root
+test-root:
+	sudo env "PATH=$$PATH" go test -count=1 ./utils/wireutil/... ./daemon/vxlan/...
+
 # Build local binaries
 local-build:
 	CGO_ENABLED=0 GOOS=linux go build -o meshnet github.com/emigcm98/meshnet-cni/plugin 

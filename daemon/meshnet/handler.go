@@ -343,7 +343,7 @@ func (m *Meshnet) IsSkipped(ctx context.Context, skip *mpb.SkipQuery) (*mpb.Bool
 }
 
 func (m *Meshnet) Update(ctx context.Context, pod *mpb.RemotePod) (*mpb.BoolResponse, error) {
-	if err := vxlan.CreateOrUpdate(pod); err != nil {
+	if _, err := vxlan.CreateOrUpdate(pod); err != nil {
 		mnetdLogger.Errorf("Failed to Update Vxlan")
 		return &mpb.BoolResponse{Response: false}, nil
 	}
