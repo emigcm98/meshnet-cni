@@ -27,13 +27,14 @@ A link whose `peer_pod` is `localhost` is a macvlan on the node interface named 
 
 ## Install
 
-The manifests create the `meshnet` namespace, the CRD, the RBAC and a DaemonSet that runs `meshnetd` on every node and drops the `meshnet` binary and its CNI configuration there. Install a tagged version, which pins the image of the same tag:
+The manifests create the `meshnet` namespace, the CRD, the RBAC and a DaemonSet that runs `meshnetd` on every node and drops the `meshnet` binary and its CNI configuration there. There is no release yet: the first one, `v1.0.0`, comes with the KubeNDT release that adopts this fork, and from then on a tag pins the manifests and the image of the same version. Until then, apply `master` and set the image to the `sha-<commit>` of the commit you want:
 
 ```sh
-kubectl apply -k "github.com/emigcm98/meshnet-cni/manifests/base?ref=v0.1.0"
+kubectl apply -k "github.com/emigcm98/meshnet-cni/manifests/base?ref=master"
+kubectl -n meshnet set image ds/meshnet meshnet=ghcr.io/emigcm98/meshnet:sha-<commit>
 ```
 
-Images live at `ghcr.io/emigcm98/meshnet`: every `v*` tag publishes its version and `latest`, every merge to `master` publishes `sha-<commit>` for testing.
+Images live at `ghcr.io/emigcm98/meshnet`: every merge to `master` publishes `sha-<commit>`, and every `v*` tag will publish its version and `latest`.
 
 ## Develop
 
