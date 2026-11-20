@@ -43,6 +43,7 @@ make docker      # the image, tagged with the commit
 make up          # a local kind cluster of one control plane and three workers
 make install     # loads the image into it and applies manifests/overlays/e2e
 make e2e         # the three-node topology of tests/3node.yml and pings over its links
+make eviction    # tests/eviction.sh: a pod recreated on its peer's worker and back, a ping per step
 make down
 ```
 
