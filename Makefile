@@ -1,13 +1,9 @@
-DOCKER_IMAGE := networkop/meshnet
+DOCKER_IMAGE := ghcr.io/emigcm98/meshnet
 GOPATH ?= ${HOME}/go
-ARCHS := "linux/amd64,linux/arm64"
-#ARCHS := "linux/amd64"
 
 COMMIT := $(shell git describe --dirty --always)
-TAG := $(shell git describe --tags --abbrev=0 || echo latest)
 
 include .mk/kind.mk
-include .mk/ci.mk
 include .mk/kustomize.mk
 include .mk/buf.mk
 
@@ -35,29 +31,9 @@ local-clean:
 
 
 .PHONY: docker
-## Build the docker image
+## Build the docker image; the published images come from the Image workflow
 docker:
-	@echo 'Creating docker image ${DOCKER_IMAGE}:${COMMIT}'
-	docker buildx create --use --name=multiarch --driver-opt network=host --buildkitd-flags '--allow-insecure-entitlement network.host' --node multiarch && \
-	docker buildx build --load \
-	--build-arg LDFLAGS=${LDFLAGS} \
-	--platform "linux/amd64" \
-	--tag ${DOCKER_IMAGE}:${COMMIT} \
-	-f docker/Dockerfile \
-	.
-
-
-.PHONY: release
-## Release the current code with git tag and `latest`
-release:
-	docker run --rm --privileged tonistiigi/binfmt --install all
-	docker buildx build --push \
-		--build-arg LDFLAGS=${LDFLAGS} \
-		--platform ${ARCHS} \
-		-t ${DOCKER_IMAGE}:${TAG} \
-		-t ${DOCKER_IMAGE}:latest \
-		-f docker/Dockerfile \
-		.
+	docker build --tag ${DOCKER_IMAGE}:${COMMIT} -f docker/Dockerfile .
 
 ## Generate GRPC code
 proto: buf-generate
@@ -69,7 +45,7 @@ proto: buf-generate
 up: kind-start
 
 .PHONY: down
-## Desroy test environment
+## Destroy test environment
 down: kind-stop
 
 .PHONY: e2e
@@ -82,7 +58,7 @@ e2e: wait-for-meshnet
 	kubectl exec r2 -- ping -c 1 23.23.23.3
 
 .PHONY: e2e-mlink
-## Run the end-to-end test with multi-links betwwen a pair of nodes. 
+## Run the end-to-end test with multi-links between a pair of nodes
 e2e-mlink: wait-for-meshnet
 	kubectl apply -f tests/3node-mlink.yml
 	kubectl wait --timeout=120s --for condition=Ready pod -l test=3node-mlink --namespace=mlink
@@ -120,8 +96,6 @@ ifdef grpc
 else
 	-kustomize build manifests/overlays/e2e | kubectl delete -f -
 endif
-
-github-ci: kust-ensure build clean local upload install e2e
 
 # From: https://gist.github.com/klmr/575726c7e05d8780505a
 help:

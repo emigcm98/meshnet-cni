@@ -15,7 +15,3 @@ kustomize: kust-ensure
 	cd -
 	cd manifests/overlays/grpc-link && $(GOPATH)/bin/kustomize edit set image ${DOCKER_IMAGE}:${COMMIT}
 
-
-.PHONY: kustomize-kops
-kustomize-kops: kust-ensure
-	kubectl apply -k manifests/overlays/kops/
