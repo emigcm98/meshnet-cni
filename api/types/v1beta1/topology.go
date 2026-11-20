@@ -25,10 +25,13 @@ type TopologySpec struct {
 
 type TopologyStatus struct {
 	metav1.TypeMeta `json:",inline"`
-	Skipped         []Skipped `json:"skipped"`
-	SrcIP           string    `json:"src_ip"`
-	NetNS           string    `json:"net_ns"`
-	ContainerID     string    `json:"container_id"`
+	// Deprecated: the daemon's reconcile decides who wires a link; kept so old writers are not pruned.
+	Skipped     []Skipped `json:"skipped"`
+	SrcIP       string    `json:"src_ip"`
+	NetNS       string    `json:"net_ns"`
+	ContainerID string    `json:"container_id"`
+	// PlumbingError is the error of the last reconcile of the pod's links, empty when they are wired.
+	PlumbingError string `json:"plumbing_error,omitempty"`
 }
 
 type Skipped struct {
@@ -43,6 +46,8 @@ type Link struct {
 	PeerIP    string `json:"peer_ip"`
 	PeerPod   string `json:"peer_pod"`
 	UID       int    `json:"uid"`
+	// MTU of the link; both ends get the larger of the two requests, LINK_MTU when neither asks.
+	MTU int `json:"mtu,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

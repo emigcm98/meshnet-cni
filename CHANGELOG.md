@@ -4,10 +4,15 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- `meshnetd` wires the links: a controller watches the Topology resources and reconciles every local pod when it or a peer changes and once a minute, so a link removed by hand or left behind by a moved pod comes back by itself. The reconcile's last error is in `status.plumbing_error`.
+- `mtu` per link, optional: both ends get the larger of the two requests, `LINK_MTU` on the daemon when neither asks.
+
 ### Changed
 
 - The plugin makes veth pairs, vxlans and macvlans with netlink instead of koko; the veth and vxlan code comes from KNE's meshnet (`wireutil/veth.go`, `vxlan.go`), a host veth pair under deterministic names with each end moved into its pod by an idempotent call.
-
+- The plugin only registers the pod with the daemon and waits up to 30 s for its interfaces, then lets the pod start; the controller and its tests come from KNE's meshnet. `status.skipped` is no longer read.
 - The module is `github.com/emigcm98/meshnet-cni`, built with Go 1.26 and the current Kubernetes client libraries.
 - The image is `ghcr.io/emigcm98/meshnet`, published by the Image workflow as `sha-<commit>` on every merge to master and as its tag and `latest` on every `v*` tag.
 - The CI checks gofmt and vet before the unit tests, and runs the three-node e2e over VXLAN and over gRPC wires on a kind of two workers, with kind 0.33 and kustomize 5.8.
