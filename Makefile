@@ -10,6 +10,11 @@ include .mk/buf.mk
 .PHONY: all
 all: docker
 
+## Check formatting and vet
+lint:
+	test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+	go vet ./...
+
 ## Run unit tests
 test:
 	go test ./...
@@ -75,6 +80,11 @@ e2e-mlink: wait-for-meshnet
 	kubectl exec r2 -n mlink -- ping -c 1 32.32.32.2
 	kubectl exec r2 -n mlink -- ping -c 1 33.33.33.2
 
+.PHONY: eviction
+## Recreate a pod on its peer's worker and back, six steps with a ping each (fails until the daemon reconciles links)
+eviction: wait-for-meshnet
+	tests/eviction.sh
+
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   
 	sleep 5
@@ -83,18 +93,18 @@ wait-for-meshnet:
 ## Install meshnet into a test cluster
 install: kind-load kind-wait-for-cni kustomize kind-connect
 ifdef grpc
-	kustomize build manifests/overlays/grpc-link-e2e  | kubectl apply -f -
+	$(GOPATH)/bin/kustomize build manifests/overlays/grpc-link-e2e | kubectl apply -f -
 else
-	kustomize build manifests/overlays/e2e | kubectl apply -f -
+	$(GOPATH)/bin/kustomize build manifests/overlays/e2e | kubectl apply -f -
 endif
 
 .PHONY: uninstall
 ## Uninstall meshnet from a test cluster
 uninstall: kind-connect
 ifdef grpc
-	-kustomize build manifests/overlays/grpc-link-e2e  | kubectl delete -f -
+	-$(GOPATH)/bin/kustomize build manifests/overlays/grpc-link-e2e | kubectl delete -f -
 else
-	-kustomize build manifests/overlays/e2e | kubectl delete -f -
+	-$(GOPATH)/bin/kustomize build manifests/overlays/e2e | kubectl delete -f -
 endif
 
 # From: https://gist.github.com/klmr/575726c7e05d8780505a

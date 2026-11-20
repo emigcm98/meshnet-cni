@@ -3,7 +3,7 @@ KIND_CLUSTER_NAME := "meshnet"
 
 .PHONY: kind-install
 kind-install:
-	go install sigs.k8s.io/kind@v0.17.0
+	go install sigs.k8s.io/kind@v0.33.0
 
 .PHONY: kind-stop
 kind-stop:
