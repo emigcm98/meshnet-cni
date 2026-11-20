@@ -1,11 +1,11 @@
 # GRPC generation
-FROM golang:1.18.2 AS proto_base
+FROM golang:1.26-bookworm AS proto_base
 
 WORKDIR /src
 
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-RUN go install github.com/bufbuild/buf/cmd/buf@v1.13.1
+COPY --from=bufbuild/buf:1.75.0 /usr/local/bin/buf /usr/local/bin/buf
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12 && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 
 COPY daemon/proto .
 COPY buf.gen.yaml .
@@ -15,11 +15,10 @@ RUN buf lint && buf generate -v
 
 #---------------------------------------------- Stage 2: Build Base : Build mesnet binraries (Plugin & daemon) - ---------------------------------
 # Building the binaries
-#FROM golang:1.17.2 AS build_base
-FROM golang:1.18.2 AS build_base
+FROM golang:1.26-bookworm AS build_base
 
 
-WORKDIR /go/src/github.com/networkop/meshnet-cni
+WORKDIR /go/src/github.com/emigcm98/meshnet-cni
 ENV CGO_ENABLED=0
 COPY go.mod .
 COPY go.sum .
@@ -54,15 +53,15 @@ RUN GOOS=${TARGETOS} CGO_ENABLED=1 GOARCH=${TARGETARCH} go build -ldflags="-s -w
 # RUN apk update; \
 #     apk add --no-cache jq
 
-FROM ubuntu:20.04
+FROM ubuntu:24.04
 RUN apt-get update; \ 
     apt-get install -y jq; \
     apt-get install -y libpcap-dev
 
 # apt-get install -y libpcap-dev; \  
 
-COPY --from=build /go/src/github.com/networkop/meshnet-cni/meshnet /
-COPY --from=build /go/src/github.com/networkop/meshnet-cni/meshnetd /
+COPY --from=build /go/src/github.com/emigcm98/meshnet-cni/meshnet /
+COPY --from=build /go/src/github.com/emigcm98/meshnet-cni/meshnetd /
 #COPY etc/cni/net.d/meshnet.conf /
 COPY docker/new-entrypoint.sh /entrypoint.sh
 COPY LICENSE /

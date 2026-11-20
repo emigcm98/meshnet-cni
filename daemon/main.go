@@ -5,11 +5,11 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/networkop/meshnet-cni/daemon/cni"
-	"github.com/networkop/meshnet-cni/daemon/grpcwire"
-	"github.com/networkop/meshnet-cni/daemon/meshnet"
-	"github.com/networkop/meshnet-cni/daemon/vxlan"
-	"github.com/networkop/meshnet-cni/utils/wireutil"
+	"github.com/emigcm98/meshnet-cni/daemon/cni"
+	"github.com/emigcm98/meshnet-cni/daemon/grpcwire"
+	"github.com/emigcm98/meshnet-cni/daemon/meshnet"
+	"github.com/emigcm98/meshnet-cni/daemon/vxlan"
+	"github.com/emigcm98/meshnet-cni/utils/wireutil"
 	log "github.com/sirupsen/logrus"
 )
 

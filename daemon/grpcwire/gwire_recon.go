@@ -7,9 +7,9 @@ import (
 	"os"
 	"reflect"
 
+	grpcwirev1 "github.com/emigcm98/meshnet-cni/api/types/v1beta1"
+	mpb "github.com/emigcm98/meshnet-cni/daemon/proto/meshnet/v1beta1"
 	"github.com/google/gopacket/pcap"
-	grpcwirev1 "github.com/networkop/meshnet-cni/api/types/v1beta1"
-	mpb "github.com/networkop/meshnet-cni/daemon/proto/meshnet/v1beta1"
 	log "github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
