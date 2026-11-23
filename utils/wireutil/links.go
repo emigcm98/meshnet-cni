@@ -4,10 +4,105 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strconv"
+	"strings"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
 )
+
+// linkTagPrefix starts the alias meshnet writes on every interface it wires in a pod, so a link
+// removed from the spec can be found and deleted without ever touching the workload's own interfaces.
+const linkTagPrefix = "meshnet/"
+
+// LinkTag is the alias of the interface of link uid towards peer.
+func LinkTag(uid int64, peer string) string {
+	return fmt.Sprintf("%s%d/%s", linkTagPrefix, uid, peer)
+}
+
+// ParseLinkTag reads a LinkTag back; ok is false for any other alias.
+func ParseLinkTag(alias string) (uid int64, peer string, ok bool) {
+	rest, found := strings.CutPrefix(alias, linkTagPrefix)
+	if !found {
+		return 0, "", false
+	}
+	uidStr, peer, found := strings.Cut(rest, "/")
+	if !found {
+		return 0, "", false
+	}
+	uid, err := strconv.ParseInt(uidStr, 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return uid, peer, true
+}
+
+// TaggedLink is an interface meshnet wired, as its tag describes it.
+type TaggedLink struct {
+	Name string
+	UID  int64
+	Peer string
+}
+
+// PruneLinks deletes from the netns at nsPath every interface tagged for a link whose uid is not in
+// keep, and returns what it deleted. Matching on the uid rather than the name leaves alone an
+// interface the workload renamed, and an untagged interface is never deleted.
+func PruneLinks(nsPath string, keep map[int64]bool) ([]TaggedLink, error) {
+	podNs, err := ns.GetNS(nsPath)
+	if err != nil {
+		return nil, fmt.Errorf("could not open netns %s: %w", nsPath, err)
+	}
+	defer podNs.Close()
+	var removed []TaggedLink
+	err = podNs.Do(func(_ ns.NetNS) error {
+		list, err := netlink.LinkList()
+		if err != nil {
+			return err
+		}
+		for _, l := range list {
+			uid, peer, ok := ParseLinkTag(l.Attrs().Alias)
+			if !ok || keep[uid] {
+				continue
+			}
+			if err := netlink.LinkDel(l); err != nil {
+				var notFound netlink.LinkNotFoundError
+				if errors.As(err, &notFound) {
+					// The other end of a veth pair deleted just before took it along.
+					continue
+				}
+				return fmt.Errorf("failed to delete %s of removed link %d: %w", l.Attrs().Name, uid, err)
+			}
+			removed = append(removed, TaggedLink{Name: l.Attrs().Name, UID: uid, Peer: peer})
+		}
+		return nil
+	})
+	return removed, err
+}
+
+// TagLinks writes tags (interface name to tag) on the interfaces of the netns at nsPath that exist
+// and do not carry them yet; a link made before tags existed is adopted this way.
+func TagLinks(nsPath string, tags map[string]string) error {
+	if len(tags) == 0 {
+		return nil
+	}
+	podNs, err := ns.GetNS(nsPath)
+	if err != nil {
+		return fmt.Errorf("could not open netns %s: %w", nsPath, err)
+	}
+	defer podNs.Close()
+	return podNs.Do(func(_ ns.NetNS) error {
+		for name, tag := range tags {
+			l, err := netlink.LinkByName(name)
+			if err != nil || l.Attrs().Alias == tag {
+				continue
+			}
+			if err := netlink.LinkSetAlias(l, tag); err != nil {
+				return fmt.Errorf("failed to tag %s: %w", name, err)
+			}
+		}
+		return nil
+	})
+}
 
 // LinkInfo says whether name exists in the netns at nsPath and what kind of link it is.
 func LinkInfo(nsPath, name string) (kind string, exists bool, err error) {

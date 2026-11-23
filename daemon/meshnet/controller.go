@@ -188,9 +188,27 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 	if err != nil {
 		return err
 	}
+
+	// A link that left the spec goes first, from the pod and from the host, so its name is free for
+	// whatever replaces it in the same pass.
+	keep := make(map[int64]bool, len(links))
+	for _, l := range links {
+		keep[l.LinkUID] = true
+	}
+	if err := m.pruneRemovedLinks(topo, netNS, keep); err != nil {
+		return err
+	}
 	if len(links) == 0 {
 		return nil
 	}
+
+	// Every link wired in this pass gets its tag at the end, which is what a later prune looks for.
+	tags := make(map[string]string, len(links))
+	defer func() {
+		if err := wireutil.TagLinks(netNS, tags); err != nil {
+			mnetdLogger.Warnf("ReconcilePodLinks: failed to tag the links of pod %s: %v", topo.GetName(), err)
+		}
+	}()
 
 	peerCache := make(map[string]*unstructured.Unstructured)
 	sameNodeLinks := make([]wireutil.PodLinkConfig, 0, len(links))
@@ -201,6 +219,7 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 				mnetdLogger.Errorf("ReconcilePodLinks: failed to create macvlan %s@%s for pod %s: %v", link.LocalIntf, link.PeerIntf, topo.GetName(), err)
 				return err
 			}
+			tags[link.LocalIntf] = wireutil.LinkTag(link.LinkUID, link.PeerPodName)
 			continue
 		}
 
@@ -258,6 +277,7 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 				mnetdLogger.Errorf("ReconcilePodLinks: failed to create VXLAN for pod %s: %v", topo.GetName(), err)
 				return err
 			}
+			tags[link.LocalIntf] = wireutil.LinkTag(link.LinkUID, link.PeerPodName)
 			if created {
 				// The kernel caps the MTU of a vxlan device at the MTU of the
 				// node's interface less the encapsulation overhead, so a large
@@ -275,6 +295,9 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 			mnetdLogger.Errorf("ReconcilePodLinks: error configuring pod %s: %v", topo.GetName(), err)
 			return err
 		}
+		for _, l := range sameNodeLinks {
+			tags[l.LocalIntf] = wireutil.LinkTag(l.LinkUID, l.PeerPodName)
+		}
 		// A peer whose end of a new pair waits on the host claims it on its own reconcile, which
 		// nothing else may trigger before the next resync.
 		for _, l := range sameNodeLinks {
@@ -286,6 +309,33 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 		}
 	}
 	return nil
+}
+
+// pruneRemovedLinks deletes the pod's tagged interfaces whose link is no longer in keep, and the host
+// ends a same-node pair of such a link may have left waiting.
+func (m *Meshnet) pruneRemovedLinks(topo *unstructured.Unstructured, netNS string, keep map[int64]bool) error {
+	removed, err := wireutil.PruneLinks(netNS, keep)
+	if err != nil {
+		mnetdLogger.Errorf("ReconcilePodLinks: failed to remove the links that left the spec of pod %s: %v", topo.GetName(), err)
+		return err
+	}
+	for _, r := range removed {
+		mnetdLogger.Infof("ReconcilePodLinks: removed %s (link %d to %s) from pod %s, no longer in its spec", r.Name, r.UID, r.Peer, topo.GetName())
+		if r.Peer == localhost {
+			continue
+		}
+		for _, name := range hostVethPair(topo.GetNamespace(), topo.GetName(), r.Peer, r.UID) {
+			if l, err := netlink.LinkByName(name); err == nil {
+				_ = netlink.LinkDel(l)
+			}
+		}
+	}
+	return nil
+}
+
+func hostVethPair(kubeNs, pod, peer string, uid int64) []string {
+	a, b := wireutil.HostVethNames(kubeNs, pod, peer, uid)
+	return []string{a, b}
 }
 
 // CleanupPodLinks cleans up lingering host veth ends when a pod is deleted or deactivated.
@@ -691,6 +741,10 @@ func (m *Meshnet) RunControllerLoop(ctx context.Context) {
 			ns, name := topo.GetNamespace(), topo.GetName()
 			dependents := m.topoCache.GetDependents(ns, name)
 			m.topoCache.Delete(ns, name)
+			// A Topology deleted while its pod keeps running takes the pod's links with it.
+			if _, netNS, _ := isPodActive(topo); m.isLocal(topo) && isNetNSValid(netNS) {
+				_ = m.pruneRemovedLinks(topo, netNS, nil)
+			}
 			_ = m.CleanupPodLinks(ctx, topo)
 			for _, depKey := range dependents {
 				depNS, depName := parseKey(depKey)

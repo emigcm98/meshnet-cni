@@ -84,6 +84,11 @@ e2e-mlink: wait-for-meshnet
 eviction: wait-for-meshnet
 	tests/eviction.sh
 
+.PHONY: live-links
+## Add and remove a veth and a vxlan on running pods, checking that no pod restarts
+live-links: wait-for-meshnet
+	tests/live-links.sh
+
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   
 	sleep 5
