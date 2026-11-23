@@ -65,3 +65,16 @@ func TestMacvlanLifecycle(t *testing.T) {
 		t.Fatalf("RemoveLink of a missing link must be fine: %v", err)
 	}
 }
+
+func TestLinkTag(t *testing.T) {
+	tag := wireutil.LinkTag(4242, "r2")
+	uid, peer, ok := wireutil.ParseLinkTag(tag)
+	if !ok || uid != 4242 || peer != "r2" {
+		t.Fatalf("ParseLinkTag(%q) = %d, %q, %t", tag, uid, peer, ok)
+	}
+	for _, alias := range []string{"", "uplink to the lab", "meshnet/", "meshnet/x/r2", "meshnet/12"} {
+		if _, _, ok := wireutil.ParseLinkTag(alias); ok {
+			t.Errorf("ParseLinkTag(%q) took a foreign alias for a tag", alias)
+		}
+	}
+}

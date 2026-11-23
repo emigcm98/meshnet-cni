@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - `meshnetd` wires the links: a controller watches the Topology resources and reconciles every local pod when it or a peer changes and once a minute, so a link removed by hand or left behind by a moved pod comes back by itself. The reconcile's last error is in `status.plumbing_error`.
 - `mtu` per link, optional: both ends get the larger of the two requests, `LINK_MTU` on the daemon when neither asks.
+- Links removed from a Topology go from the running pods, and links added are wired, without restarting them. meshnet tags the interfaces it wires (`meshnet/<uid>/<peer>` in their alias) and never deletes one without its tag.
 
 ### Changed
 

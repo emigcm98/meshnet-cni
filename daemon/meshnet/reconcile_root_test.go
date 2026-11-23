@@ -254,3 +254,101 @@ func TestReconcileReplacesOldPairWhenPeerComesBack(t *testing.T) {
 		t.Fatalf("b eth1's peer is ifindex %d, the new a eth1 is %d: b kept the old pair", bPeer, newSelf)
 	}
 }
+
+func linkIndex(t *testing.T, netNS ns.NetNS, name string) int {
+	t.Helper()
+	index := 0
+	_ = netNS.Do(func(_ ns.NetNS) error {
+		if l, err := netlink.LinkByName(name); err == nil {
+			index = l.Attrs().Index
+		}
+		return nil
+	})
+	return index
+}
+
+// Links removed from the spec go from the running pods, a veth from both ends and a vxlan from its
+// own, while the link that stays is not touched and an interface of the workload's own is left alone.
+func TestReconcilePrunesRemovedLinks(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	InitLogger()
+	nsA, err := testutils.NewNS()
+	if err != nil {
+		t.Fatalf("creating netns a: %v", err)
+	}
+	defer nsA.Close()
+	nsB, err := testutils.NewNS()
+	if err != nil {
+		t.Fatalf("creating netns b: %v", err)
+	}
+	defer nsB.Close()
+	vtep := "vteptest0"
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: vtep}}); err != nil {
+		t.Fatalf("adding the vtep dummy: %v", err)
+	}
+	defer func() {
+		if l, err := netlink.LinkByName(vtep); err == nil {
+			_ = netlink.LinkDel(l)
+		}
+	}()
+	if err := nsA.Do(func(_ ns.NetNS) error {
+		return netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "eth5"}})
+	}); err != nil {
+		t.Fatalf("adding the workload's own interface: %v", err)
+	}
+
+	keepAB := map[string]interface{}{"uid": int64(21), "peer_pod": "b", "local_intf": "eth1", "peer_intf": "eth1"}
+	dropAB := map[string]interface{}{"uid": int64(22), "peer_pod": "b", "local_intf": "eth2", "peer_intf": "eth2"}
+	dropAC := map[string]interface{}{"uid": int64(23), "peer_pod": "c", "local_intf": "eth3", "peer_intf": "eth1"}
+	dropBA := map[string]interface{}{"uid": int64(22), "peer_pod": "a", "local_intf": "eth2", "peer_intf": "eth2"}
+	keepBA := map[string]interface{}{"uid": int64(21), "peer_pod": "a", "local_intf": "eth1", "peer_intf": "eth1"}
+	a := topologyWithLinks("a", "10.0.0.1", nsA.Path(), keepAB, dropAB, dropAC)
+	b := topologyWithLinks("b", "10.0.0.1", nsB.Path(), keepBA, dropBA)
+	c := topologyWithLinks("c", "10.0.0.2", "/var/run/netns/elsewhere",
+		map[string]interface{}{"uid": int64(23), "peer_pod": "a", "local_intf": "eth1", "peer_intf": "eth3"})
+	client, err := fakeTopology.NewSimpleClientset(a, b, c)
+	if err != nil {
+		t.Fatalf("fake clientset: %v", err)
+	}
+	m := &Meshnet{nodeIP: "10.0.0.1", nodeIntf: vtep, tClient: client, topoCache: NewTopologyCache()}
+	for _, topo := range []*unstructured.Unstructured{a, b, c} {
+		m.topoCache.Put(topo)
+	}
+	for _, topo := range []*unstructured.Unstructured{a, b} {
+		if err := m.ReconcilePodLinks(context.Background(), topo); err != nil {
+			t.Fatalf("first pass of %s: %v", topo.GetName(), err)
+		}
+	}
+	for name, want := range map[string]string{"eth1": "veth", "eth2": "veth", "eth3": "vxlan"} {
+		if k := linkKind(t, nsA, name); k != want {
+			t.Fatalf("a %s is %q after the first pass, want %s", name, k, want)
+		}
+	}
+	keptIndex := linkIndex(t, nsA, "eth1")
+
+	a = topologyWithLinks("a", "10.0.0.1", nsA.Path(), keepAB)
+	b = topologyWithLinks("b", "10.0.0.1", nsB.Path(), keepBA)
+	m.topoCache.Put(a)
+	m.topoCache.Put(b)
+	for _, topo := range []*unstructured.Unstructured{a, b} {
+		if err := m.ReconcilePodLinks(context.Background(), topo); err != nil {
+			t.Fatalf("pass of %s after the removal: %v", topo.GetName(), err)
+		}
+	}
+	for _, name := range []string{"eth2", "eth3"} {
+		if k := linkKind(t, nsA, name); k != "" {
+			t.Errorf("a still has %s (%s) after its link left the spec", name, k)
+		}
+	}
+	if k := linkKind(t, nsB, "eth2"); k != "" {
+		t.Errorf("b still has eth2 (%s) after its link left the spec", k)
+	}
+	if got := linkIndex(t, nsA, "eth1"); got != keptIndex {
+		t.Errorf("a eth1 was remade (ifindex %d, was %d), the link that stays must not be touched", got, keptIndex)
+	}
+	if k := linkKind(t, nsA, "eth5"); k != "dummy" {
+		t.Errorf("the workload's own eth5 is %q, it must be left alone", k)
+	}
+}
