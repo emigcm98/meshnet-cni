@@ -64,6 +64,67 @@ spec:
                     unplugged:
                       description: '(Optional) The cable pulled: both ends lose carrier and keep their configuration; either end declaring it unplugs the link'
                       type: boolean
+                    shaping:
+                      description: '(Optional) Shaping of the traffic the local end sends, a netem or a tbf with tc units'
+                      type: object
+                      properties:
+                        qdisc:
+                          description: 'netem (the default) or tbf'
+                          type: string
+                          enum: ["netem", "tbf"]
+                        delay:
+                          description: 'netem: one-way delay, as 100ms'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?(us|usec|ms|msec|s|sec)$'
+                        jitter:
+                          description: 'netem: delay variation, needs a delay'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?(us|usec|ms|msec|s|sec)$'
+                        delay_correlation:
+                          description: 'netem: correlation of the jitter, needs a jitter'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?%?$'
+                        loss:
+                          description: 'netem: random loss, as 1%'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?%?$'
+                        loss_correlation:
+                          description: 'netem: correlation of the loss'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?%?$'
+                        duplicate:
+                          description: 'netem: duplicated packets'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?%?$'
+                        corrupt:
+                          description: 'netem: corrupted packets'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?%?$'
+                        reorder:
+                          description: 'netem: reordered packets, needs a delay'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?%?$'
+                        reorder_correlation:
+                          description: 'netem: correlation of the reordering'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?%?$'
+                        limit:
+                          description: 'netem: queue length in packets, 1000 when absent'
+                          type: integer
+                          minimum: 1
+                          maximum: 1000000
+                        rate:
+                          description: 'netem: link rate; tbf: its rate, required; as 10mbit'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?([kmgt]i?)?(bit|bps)$'
+                        burst:
+                          description: 'tbf: bucket size, 32kbit when absent'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?(b|[kmg]b?|[kmg]bit)?$'
+                        latency:
+                          description: 'tbf: the longest a packet may wait, 50ms when absent'
+                          type: string
+                          pattern: '^[0-9]+(\.[0-9]+)?(us|usec|ms|msec|s|sec)$'
                   type: object
                 type: array
             type: object

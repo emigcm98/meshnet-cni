@@ -99,6 +99,11 @@ off-links: wait-for-meshnet
 declared: wait-for-meshnet
 	tests/declared.sh
 
+.PHONY: shaping
+## Check the shaping of links: per direction, on one node and across nodes, changed live, kept across a recreation
+shaping: wait-for-meshnet
+	tests/shaping.sh
+
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   
 	sleep 5

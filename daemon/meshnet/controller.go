@@ -5,6 +5,7 @@ package meshnet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -94,6 +95,25 @@ func isPodActive(topo *unstructured.Unstructured) (srcIP, netNS string, active b
 	return srcIP, netNS, active
 }
 
+// parseShaping reads the shaping of a link, nil when it declares none.
+func parseShaping(rl map[string]interface{}) *wireutil.Shaping {
+	m, found, _ := unstructured.NestedMap(rl, "shaping")
+	if !found || len(m) == 0 {
+		return nil
+	}
+	str := func(k string) string {
+		v, _, _ := unstructured.NestedString(m, k)
+		return v
+	}
+	limit, _, _ := unstructured.NestedInt64(m, "limit")
+	return &wireutil.Shaping{
+		Qdisc: str("qdisc"), Delay: str("delay"), Jitter: str("jitter"), DelayCorrelation: str("delay_correlation"),
+		Loss: str("loss"), LossCorrelation: str("loss_correlation"), Duplicate: str("duplicate"), Corrupt: str("corrupt"),
+		Reorder: str("reorder"), ReorderCorrelation: str("reorder_correlation"), Limit: int(limit),
+		Rate: str("rate"), Burst: str("burst"), Latency: str("latency"),
+	}
+}
+
 // parsePodLinks extracts all links from spec.links in a Topology resource.
 func parsePodLinks(topo *unstructured.Unstructured) ([]wireutil.PodLinkConfig, error) {
 	if topo == nil {
@@ -145,6 +165,7 @@ func parsePodLinks(topo *unstructured.Unstructured) ([]wireutil.PodLinkConfig, e
 			TxQLen:      int(txQLen),
 			Offloads:    offloads,
 			Unplugged:   unplugged,
+			Shaping:     parseShaping(rl),
 		})
 	}
 	return links, nil
@@ -212,11 +233,12 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 	}
 
 	// Every interface wired here is declared and tagged as it is wired, and the tag is what a later
-	// prune looks for.
+	// prune looks for. A shaping or an uplink that fails is reported once the pass has wired the rest.
+	var deferred []error
 	peerCache := make(map[string]*unstructured.Unstructured)
 	for _, link := range links {
 		// The external uplink: a macvlan on a node interface, with no peer pod to wait for and no
-		// node end, so it has no cable to unplug.
+		// node end, so it has no cable to unplug and carries its own shaping.
 		if link.PeerPodName == localhost {
 			created, err := wireutil.MakeMacvlan(netNS, link.LocalIntf, link.PeerIntf)
 			if err == nil {
@@ -224,7 +246,7 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 			}
 			if err != nil {
 				mnetdLogger.Errorf("ReconcilePodLinks: failed to wire macvlan %s@%s for pod %s: %v", link.LocalIntf, link.PeerIntf, topo.GetName(), err)
-				return err
+				deferred = append(deferred, fmt.Errorf("uplink %s: %w", link.LocalIntf, err))
 			}
 			continue
 		}
@@ -250,6 +272,19 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 			mnetdLogger.Errorf("ReconcilePodLinks: failed to join %s of pod %s to %s: %v", link.LocalIntf, topo.GetName(), link.PeerPodName, err)
 			return err
 		}
+		// The traffic towards this pod is shaped on its node end, as the peer declares what it sends.
+		if err := wireutil.ShapeHostEnd(end.Host, peerLinkShaping(peerTopo, link.LinkUID)); err != nil {
+			mnetdLogger.Errorf("ReconcilePodLinks: failed to shape %s of pod %s: %v", link.LocalIntf, topo.GetName(), err)
+			deferred = append(deferred, fmt.Errorf("shaping of %s, from %s: %w", link.LocalIntf, link.PeerPodName, err))
+		}
+	}
+	return errors.Join(deferred...)
+}
+
+// peerLinkShaping returns the shaping the peer's Topology declares for what it sends on link uid.
+func peerLinkShaping(peerTopo *unstructured.Unstructured, uid int64) *wireutil.Shaping {
+	if l, ok := findPodLink(peerTopo, uid); ok {
+		return l.Shaping
 	}
 	return nil
 }
