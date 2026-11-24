@@ -1,6 +1,7 @@
 .PHONY: kust-install
+# kustomize 5.8 asks for a newer Go than the module's: let go fetch that toolchain even where GOTOOLCHAIN is local, as setup-go sets it.
 kust-install:
-	go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.3
+	GOTOOLCHAIN=auto go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.3
 
 .PHONY: kust-ensure
 kust-ensure:
