@@ -6,13 +6,14 @@ package meshnet
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,8 +22,6 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	topologyclientv1 "github.com/emigcm98/meshnet-cni/api/clientset/v1beta1"
-	mpb "github.com/emigcm98/meshnet-cni/daemon/proto/meshnet/v1beta1"
-	"github.com/emigcm98/meshnet-cni/daemon/vxlan"
 	"github.com/emigcm98/meshnet-cni/utils/wireutil"
 )
 
@@ -211,7 +210,6 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 	}()
 
 	peerCache := make(map[string]*unstructured.Unstructured)
-	sameNodeLinks := make([]wireutil.PodLinkConfig, 0, len(links))
 	for _, link := range links {
 		// The external uplink: a macvlan on a node interface, with no peer pod to wait for.
 		if link.PeerPodName == localhost {
@@ -225,94 +223,171 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 
 		peerTopo, ok := peerCache[link.PeerPodName]
 		if !ok {
-			var err error
-			peerTopo, err = m.getPod(ctx, link.PeerPodName, link.KubeNs)
-			if err != nil {
-				peerCache[link.PeerPodName] = nil
-				continue
-			}
+			peerTopo, _ = m.getPod(ctx, link.PeerPodName, link.KubeNs)
 			peerCache[link.PeerPodName] = peerTopo
 		}
-		if peerTopo == nil {
-			continue
+		// Both ends of a link get the same MTU, whichever end requests it, and without a request the
+		// one a vxlan carries, so the interface needs no change if its peer moves to another node.
+		mtu := wireutil.LinkMTU(link.MTU, peerLinkMTU(peerTopo, link.LinkUID))
+		if mtu <= 0 {
+			mtu = m.defaultMTU
 		}
-		peerSrcIP, peerNetNS, peerActive := isPodActive(peerTopo)
-		if !peerActive {
-			continue
-		}
-		// Both ends of a link get the same MTU, whichever end requests it.
-		link.MTU = wireutil.LinkMTU(link.MTU, peerLinkMTU(peerTopo, link.LinkUID))
-		if peerSrcIP == srcIP || (m.nodeIP == "" && srcIP == "") {
-			if peerNetNS != "" {
-				// An interface with this name that is not a veth is what the pod kept from a link that
-				// crossed workers before its peer moved here; it goes before the veth is plumbed.
-				if podNs, err := ns.GetNS(netNS); err == nil {
-					_ = podNs.Do(func(_ ns.NetNS) error {
-						if l, err := netlink.LinkByName(link.LocalIntf); err == nil {
-							if l.Type() != "veth" {
-								mnetdLogger.Infof("ReconcilePodLinks: removing non-veth interface %s (%s) from netns %s before same-node veth plumbing", link.LocalIntf, l.Type(), netNS)
-								_ = netlink.LinkDel(l)
-							}
-						}
-						return nil
-					})
-					podNs.Close()
-				}
-				sameNodeLinks = append(sameNodeLinks, link)
-			}
-		} else if peerSrcIP != "" {
-			remotePod := &mpb.RemotePod{
-				NetNs:    netNS,
-				IntfName: link.LocalIntf,
-				IntfIp:   link.LocalIP,
-				PeerVtep: peerSrcIP,
-				Vni:      link.LinkUID + vxlanBase,
-				KubeNs:   link.KubeNs,
-				NodeIntf: m.nodeIntf,
-			}
-			mnetdLogger.Debugf("ReconcilePodLinks: configuring VXLAN link for pod %s interface %s (peer %s on VTEP %s, VNI %d)",
-				topo.GetName(), link.LocalIntf, link.PeerPodName, peerSrcIP, remotePod.Vni)
-			created, err := vxlan.CreateOrUpdate(remotePod)
-			if err != nil {
-				mnetdLogger.Errorf("ReconcilePodLinks: failed to create VXLAN for pod %s: %v", topo.GetName(), err)
-				return err
-			}
-			tags[link.LocalIntf] = wireutil.LinkTag(link.LinkUID, link.PeerPodName)
-			if created {
-				// The kernel caps the MTU of a vxlan device at the MTU of the
-				// node's interface less the encapsulation overhead, so a large
-				// MTU may not fit; keep the link up at its default MTU then.
-				if err := wireutil.SetLinkMTU(netNS, link.LocalIntf, link.MTU); err != nil {
-					mnetdLogger.Warnf("ReconcilePodLinks: failed to set MTU of VXLAN link for pod %s interface %s: %v", topo.GetName(), link.LocalIntf, err)
-				}
-			}
-		}
-	}
-
-	if len(sameNodeLinks) > 0 {
-		mnetdLogger.Debugf("ReconcilePodLinks: configuring %d active same-node links for pod %s (%s)", len(sameNodeLinks), topo.GetName(), netNS)
-		if err := wireutil.ConfigurePodLinks(netNS, sameNodeLinks); err != nil {
-			mnetdLogger.Errorf("ReconcilePodLinks: error configuring pod %s: %v", topo.GetName(), err)
+		// The pod gets its interface whether its peer is up or not; it has no carrier until it is.
+		end := wireutil.NewPodEnd(netNS, link, mtu)
+		if _, err := wireutil.EnsurePodEnd(end); err != nil {
+			mnetdLogger.Errorf("ReconcilePodLinks: failed to plumb %s of pod %s: %v", link.LocalIntf, topo.GetName(), err)
 			return err
 		}
-		for _, l := range sameNodeLinks {
-			tags[l.LocalIntf] = wireutil.LinkTag(l.LinkUID, l.PeerPodName)
-		}
-		// A peer whose end of a new pair waits on the host claims it on its own reconcile, which
-		// nothing else may trigger before the next resync.
-		for _, l := range sameNodeLinks {
-			if _, peerHostName := wireutil.HostVethNames(l.KubeNs, l.PodName, l.PeerPodName, l.LinkUID); peerHostName != "" {
-				if _, err := netlink.LinkByName(peerHostName); err == nil {
-					m.enqueueReconcile(fmt.Sprintf("%s/%s", l.KubeNs, l.PeerPodName))
-				}
-			}
+		tags[link.LocalIntf] = wireutil.LinkTag(link.LinkUID, link.PeerPodName)
+		if err := m.joinLink(link, srcIP, netNS, end.Host, peerTopo); err != nil {
+			mnetdLogger.Errorf("ReconcilePodLinks: failed to join %s of pod %s to %s: %v", link.LocalIntf, topo.GetName(), link.PeerPodName, err)
+			return err
 		}
 	}
 	return nil
 }
 
-// pruneRemovedLinks deletes the pod's tagged interfaces whose link is no longer in keep, and the host
-// ends a same-node pair of such a link may have left waiting.
+// joinLink joins the node end of a link to its peer's and sets the carrier the pod sees: none while
+// the peer is off, the peer's admin state when both are on this node, up across nodes.
+func (m *Meshnet) joinLink(link wireutil.PodLinkConfig, srcIP, netNS, hostEnd string, peerTopo *unstructured.Unstructured) error {
+	vxName := wireutil.HostVxlanName(link.KubeNs, link.PodName, link.LinkUID)
+	peerSrcIP, peerNetNS, peerActive := isPodActive(peerTopo)
+	if !peerActive {
+		m.forgetJoin(hostEnd)
+		_ = wireutil.RemoveHostLink(vxName)
+		return wireutil.SetHostEndUp(hostEnd, false)
+	}
+	if peerSrcIP == srcIP {
+		_ = wireutil.RemoveHostLink(vxName)
+		peerHost := wireutil.HostEndName(link.KubeNs, link.PeerPodName, link.LinkUID)
+		if !wireutil.HostLinkExists(peerHost) {
+			// The peer's own reconcile makes its end, and joins the two.
+			m.forgetJoin(hostEnd)
+			m.enqueueReconcile(fmt.Sprintf("%s/%s", link.KubeNs, link.PeerPodName))
+			return wireutil.SetHostEndUp(hostEnd, false)
+		}
+		if err := wireutil.JoinHostEnds(hostEnd, peerHost); err != nil {
+			return err
+		}
+		m.rememberJoin(hostEnd, hostJoin{peerHost: peerHost, netNS: netNS, intf: link.LocalIntf, peerNetNS: peerNetNS, peerIntf: link.PeerIntf})
+		m.syncCarrier(hostEnd)
+		return nil
+	}
+	m.forgetJoin(hostEnd)
+	remote := net.ParseIP(peerSrcIP)
+	if remote == nil {
+		return fmt.Errorf("peer %s has an unusable node address %q", link.PeerPodName, peerSrcIP)
+	}
+	if err := wireutil.JoinVxlan(hostEnd, vxName, int(link.LinkUID+vxlanBase), remote, m.nodeIntf); err != nil {
+		return err
+	}
+	return wireutil.SetHostEndUp(hostEnd, true)
+}
+
+// hostJoin is a same-node join as seen from one of its node ends.
+type hostJoin struct {
+	peerHost            string
+	netNS, intf         string
+	peerNetNS, peerIntf string
+}
+
+// rememberJoin records a same-node join under both of its node ends, for the carrier watcher.
+func (m *Meshnet) rememberJoin(hostEnd string, j hostJoin) {
+	m.joinsMu.Lock()
+	defer m.joinsMu.Unlock()
+	if m.joins == nil {
+		m.joins = make(map[string]hostJoin)
+	}
+	m.joins[hostEnd] = j
+	m.joins[j.peerHost] = hostJoin{peerHost: hostEnd, netNS: j.peerNetNS, intf: j.peerIntf, peerNetNS: j.netNS, peerIntf: j.intf}
+}
+
+// forgetJoin drops the same-node join of a node end, if it has one, from both sides.
+func (m *Meshnet) forgetJoin(hostEnd string) {
+	m.joinsMu.Lock()
+	defer m.joinsMu.Unlock()
+	if j, ok := m.joins[hostEnd]; ok {
+		delete(m.joins, hostEnd)
+		if back, ok := m.joins[j.peerHost]; ok && back.peerHost == hostEnd {
+			delete(m.joins, j.peerHost)
+		}
+	}
+}
+
+func (m *Meshnet) lookupJoin(hostEnd string) (hostJoin, bool) {
+	m.joinsMu.Lock()
+	defer m.joinsMu.Unlock()
+	j, ok := m.joins[hostEnd]
+	return j, ok
+}
+
+// syncCarrier gives each pod of a same-node join the carrier the other's admin state says, as a
+// cable does: each node end is up exactly when the interface on the other side is.
+func (m *Meshnet) syncCarrier(hostEnd string) {
+	j, ok := m.lookupJoin(hostEnd)
+	if !ok {
+		return
+	}
+	mineUp := wireutil.PodEndAdminUp(j.netNS, j.intf)
+	peerUp := wireutil.PodEndAdminUp(j.peerNetNS, j.peerIntf)
+	if err := wireutil.SetHostEndUp(hostEnd, peerUp); err != nil {
+		mnetdLogger.Debugf("syncCarrier: %s: %v", hostEnd, err)
+	}
+	if err := wireutil.SetHostEndUp(j.peerHost, mineUp); err != nil {
+		mnetdLogger.Debugf("syncCarrier: %s: %v", j.peerHost, err)
+	}
+}
+
+// watchHostEnds follows the node ends of same-node joins: a pod that shuts its interface takes the
+// carrier of its neighbour's at once, and a pod that goes takes it too, before any reconcile runs.
+func (m *Meshnet) watchHostEnds(ctx context.Context) {
+	for ctx.Err() == nil {
+		updates := make(chan netlink.LinkUpdate, 256)
+		done := make(chan struct{})
+		err := netlink.LinkSubscribeWithOptions(updates, done, netlink.LinkSubscribeOptions{
+			ErrorCallback: func(err error) { mnetdLogger.Warnf("watchHostEnds: %v", err) },
+		})
+		if err != nil {
+			mnetdLogger.Errorf("watchHostEnds: cannot follow the node's links: %v", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+		for open := true; open; {
+			select {
+			case <-ctx.Done():
+				close(done)
+				return
+			case u, ok := <-updates:
+				if !ok {
+					open = false
+					break
+				}
+				name := u.Attrs().Name
+				if !wireutil.IsHostEnd(name) {
+					continue
+				}
+				j, joined := m.lookupJoin(name)
+				if !joined {
+					continue
+				}
+				if u.Header.Type == unix.RTM_DELLINK {
+					m.forgetJoin(name)
+					_ = wireutil.SetHostEndUp(j.peerHost, false)
+					continue
+				}
+				m.syncCarrier(name)
+			}
+		}
+		close(done)
+	}
+}
+
+// pruneRemovedLinks deletes the pod's tagged interfaces whose link is no longer in keep, which takes
+// their node ends along, and the vxlans that carried them.
 func (m *Meshnet) pruneRemovedLinks(topo *unstructured.Unstructured, netNS string, keep map[int64]bool) error {
 	removed, err := wireutil.PruneLinks(netNS, keep)
 	if err != nil {
@@ -324,21 +399,14 @@ func (m *Meshnet) pruneRemovedLinks(topo *unstructured.Unstructured, netNS strin
 		if r.Peer == localhost {
 			continue
 		}
-		for _, name := range hostVethPair(topo.GetNamespace(), topo.GetName(), r.Peer, r.UID) {
-			if l, err := netlink.LinkByName(name); err == nil {
-				_ = netlink.LinkDel(l)
-			}
-		}
+		m.forgetJoin(wireutil.HostEndName(topo.GetNamespace(), topo.GetName(), r.UID))
+		_ = wireutil.RemoveHostLink(wireutil.HostVxlanName(topo.GetNamespace(), topo.GetName(), r.UID))
 	}
 	return nil
 }
 
-func hostVethPair(kubeNs, pod, peer string, uid int64) []string {
-	a, b := wireutil.HostVethNames(kubeNs, pod, peer, uid)
-	return []string{a, b}
-}
-
-// CleanupPodLinks cleans up lingering host veth ends when a pod is deleted or deactivated.
+// CleanupPodLinks removes what a pod's links keep on the node once the pod is gone: its node ends go
+// with its netns, the vxlans that carried them stay and go here.
 func (m *Meshnet) CleanupPodLinks(ctx context.Context, topo *unstructured.Unstructured) error {
 	if topo == nil {
 		return nil
@@ -351,11 +419,8 @@ func (m *Meshnet) CleanupPodLinks(ctx context.Context, topo *unstructured.Unstru
 		if link.PeerPodName == localhost {
 			continue
 		}
-		localHostName, _ := wireutil.HostVethNames(link.KubeNs, link.PodName, link.PeerPodName, link.LinkUID)
-		if l, err := netlink.LinkByName(localHostName); err == nil {
-			mnetdLogger.Infof("CleanupPodLinks: removing lingering host veth %s for deleted pod %s", localHostName, topo.GetName())
-			_ = netlink.LinkDel(l)
-		}
+		m.forgetJoin(wireutil.HostEndName(link.KubeNs, link.PodName, link.LinkUID))
+		_ = wireutil.RemoveHostLink(wireutil.HostVxlanName(link.KubeNs, link.PodName, link.LinkUID))
 	}
 	return nil
 }
@@ -613,34 +678,24 @@ func (m *Meshnet) enqueuePodAndDependents(ns, name string) {
 	}
 }
 
-// CleanupOrphanedHostVeths scans the host network namespace for any temporary host veths ("vnm-...")
-// that do not match any link in any currently existing Topology resource and deletes them.
-// This cleans up partial veths left behind by topologies that were deleted while meshnetd was offline.
-func (m *Meshnet) CleanupOrphanedHostVeths(ctx context.Context) error {
-	topos, err := m.listTopologies(ctx)
-	if err != nil {
-		return err
-	}
-
-	validHostNames := make(map[string]bool)
-	for _, u := range topos {
-		links, _ := parsePodLinks(u)
-		for _, l := range links {
-			side0, side1 := wireutil.HostVethNames(l.KubeNs, l.PodName, l.PeerPodName, l.LinkUID)
-			validHostNames[side0] = true
-			validHostNames[side1] = true
-		}
-	}
-
+// CleanupOrphanedHostLinks removes what no pod uses any more from the node: a vxlan whose node end is
+// gone (its pod went, or the link moved onto one node) and the host veths of the previous wiring, which
+// joined two pods directly and are never made now.
+func (m *Meshnet) CleanupOrphanedHostLinks(ctx context.Context) error {
 	hostLinks, err := netlink.LinkList()
 	if err != nil {
 		return err
 	}
-
+	present := make(map[string]bool, len(hostLinks))
+	for _, l := range hostLinks {
+		present[l.Attrs().Name] = true
+	}
 	for _, l := range hostLinks {
 		name := l.Attrs().Name
-		if strings.HasPrefix(name, "vnm-") && !validHostNames[name] {
-			mnetdLogger.Infof("CleanupOrphanedHostVeths: removing orphaned host veth %s (no matching Topology link)", name)
+		orphan := strings.HasPrefix(name, wireutil.LegacyHostVethPrefix) ||
+			(wireutil.IsHostVxlan(name) && !present[wireutil.HostEndOfVxlan(name)])
+		if orphan {
+			mnetdLogger.Infof("CleanupOrphanedHostLinks: removing %s, which no pod uses", name)
 			_ = netlink.LinkDel(l)
 		}
 	}
@@ -691,7 +746,7 @@ func (m *Meshnet) runReconcileWorker(ctx context.Context) {
 		case <-m.reconcileQueue.notifyChan:
 			isFull, keys := m.reconcileQueue.Drain()
 			if isFull {
-				_ = m.CleanupOrphanedHostVeths(ctx)
+				_ = m.CleanupOrphanedHostLinks(ctx)
 				_ = m.ReconcileAllLocalPods(ctx)
 			} else {
 				for _, key := range keys {
@@ -766,7 +821,19 @@ func (m *Meshnet) RunControllerLoop(ctx context.Context) {
 	}
 	mnetdLogger.Infof("Topology informer cache synced successfully")
 	m.enqueueFullReconcile()
-	<-ctx.Done()
+	go m.watchHostEnds(ctx)
+	// The informer's resync reconciles every pod each minute; what a pod that left this node leaves
+	// on it is swept at the same pace.
+	ticker := time.NewTicker(resyncPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = m.CleanupOrphanedHostLinks(ctx)
+		}
+	}
 }
 
 // updatePlumbingErrorStatus writes the provided plumbing error message (or clears it if empty)

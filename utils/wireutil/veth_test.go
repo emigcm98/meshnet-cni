@@ -1,12 +1,10 @@
-// The netns tests are ported from openconfig/kne, third_party/meshnet/utils/wireutil/veth_test.go at 5a1676c (Apache 2.0).
-
 package wireutil_test
 
 import (
-	"fmt"
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
@@ -15,178 +13,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestHostVethNames(t *testing.T) {
-	a, b := wireutil.HostVethNames("ns", "r1", "r2", 7)
-	b2, a2 := wireutil.HostVethNames("ns", "r2", "r1", 7)
-	if a != a2 || b != b2 {
-		t.Fatalf("the two pods disagree on the host names: (%s, %s) against (%s, %s)", a, b, a2, b2)
+func TestHostEndNames(t *testing.T) {
+	a := wireutil.HostEndName("ns", "r1", 7)
+	if a != wireutil.HostEndName("ns", "r1", 7) {
+		t.Fatalf("HostEndName is not deterministic")
 	}
-	if a == b || len(a) != 14 || len(b) != 14 {
-		t.Fatalf("host names must be distinct and fit an interface name: %s, %s", a, b)
-	}
-	if c, _ := wireutil.HostVethNames("ns", "r1", "r2", 8); c == a {
-		t.Fatalf("a different link got the same host name %s", c)
-	}
-}
-
-func TestConfigurePodLinks(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges. Run test with sudo")
-	}
-
-	ns1, err := testutils.NewNS()
-	if err != nil {
-		t.Fatalf("Failed to create ns1: %v", err)
-	}
-	defer ns1.Close()
-
-	ns2, err := testutils.NewNS()
-	if err != nil {
-		t.Fatalf("Failed to create ns2: %v", err)
-	}
-	defer ns2.Close()
-
-	numLinks := 50
-	links1 := make([]wireutil.PodLinkConfig, numLinks)
-	links2 := make([]wireutil.PodLinkConfig, numLinks)
-
-	for i := 0; i < numLinks; i++ {
-		links1[i] = wireutil.PodLinkConfig{
-			PodName:     "p1",
-			PeerPodName: "p2",
-			LinkUID:     int64(i + 1),
-			KubeNs:      "testns",
-			LocalIntf:   fmt.Sprintf("eth%d", i+1),
-			LocalIP:     fmt.Sprintf("10.100.%d.1/30", i),
-			MTU:         1500,
-		}
-		links2[i] = wireutil.PodLinkConfig{
-			PodName:     "p2",
-			PeerPodName: "p1",
-			LinkUID:     int64(i + 1),
-			KubeNs:      "testns",
-			LocalIntf:   fmt.Sprintf("eth%d", i+1),
-			LocalIP:     fmt.Sprintf("10.100.%d.2/30", i),
-			MTU:         1500,
+	for _, other := range []string{wireutil.HostEndName("ns", "r2", 7), wireutil.HostEndName("ns", "r1", 8), wireutil.HostEndName("other", "r1", 7)} {
+		if other == a {
+			t.Fatalf("two different link ends got the same node end %s", a)
 		}
 	}
-
-	// Step 1: Plumb all links for Pod 1 (p1).
-	// This creates the host veth pairs, moves p1's ends into ns1, and leaves p2's ends waiting on the host.
-	if err := wireutil.ConfigurePodLinks(ns1.Path(), links1); err != nil {
-		t.Fatalf("ConfigurePodLinks(p1) failed: %v", err)
+	vx := wireutil.HostVxlanName("ns", "r1", 7)
+	if !wireutil.IsHostEnd(a) || wireutil.IsHostEnd(vx) || !wireutil.IsHostVxlan(vx) || wireutil.HostEndOfVxlan(vx) != a {
+		t.Fatalf("names %s and %s are not told apart or matched", a, vx)
 	}
-
-	// Verify p2's waiting ends are present on the host
-	for i := 0; i < numLinks; i++ {
-		_, peerHostName := wireutil.HostVethNames("testns", "p1", "p2", int64(i+1))
-		if _, err := netlink.LinkByName(peerHostName); err != nil {
-			t.Fatalf("Expected waiting host veth end %s on host, got error: %v", peerHostName, err)
-		}
-	}
-
-	// Step 2: Plumb all links for Pod 2 (p2).
-	// This discovers the waiting host endpoints and moves them into ns2.
-	if err := wireutil.ConfigurePodLinks(ns2.Path(), links2); err != nil {
-		t.Fatalf("ConfigurePodLinks(p2) failed: %v", err)
-	}
-
-	verify := func(netNS ns.NetNS, side int) error {
-		return netNS.Do(func(_ ns.NetNS) error {
-			for i := 0; i < numLinks; i++ {
-				name := fmt.Sprintf("eth%d", i+1)
-				link, err := netlink.LinkByName(name)
-				if err != nil {
-					return fmt.Errorf("missing interface %s: %w", name, err)
-				}
-				if (link.Attrs().Flags & net.FlagUp) == 0 {
-					return fmt.Errorf("interface %s is not UP", name)
-				}
-				addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-				if err != nil || len(addrs) == 0 {
-					return fmt.Errorf("missing IPv4 address on %s: %v", name, err)
-				}
-				expectedIP := fmt.Sprintf("10.100.%d.%d/30", i, side)
-				if addrs[0].IPNet.String() != expectedIP {
-					return fmt.Errorf("expected IP %s on %s, got %s", expectedIP, name, addrs[0].IPNet.String())
-				}
-			}
-			return nil
-		})
-	}
-	if err := verify(ns1, 1); err != nil {
-		t.Fatalf("Verification failed in ns1: %v", err)
-	}
-	if err := verify(ns2, 2); err != nil {
-		t.Fatalf("Verification failed in ns2: %v", err)
-	}
-
-	// Step 3: Test crash/retry resiliency by running ConfigurePodLinks again (idempotence check).
-	if err := wireutil.ConfigurePodLinks(ns1.Path(), links1); err != nil {
-		t.Fatalf("Idempotent ConfigurePodLinks(p1) failed: %v", err)
-	}
-	if err := wireutil.ConfigurePodLinks(ns2.Path(), links2); err != nil {
-		t.Fatalf("Idempotent ConfigurePodLinks(p2) failed: %v", err)
-	}
-}
-
-// TestConfigurePodLinksPreservesAdminDown checks that re-running ConfigurePodLinks, as every
-// reconcile does, leaves an interface that the workload shut down administratively down, so
-// that its veth peer keeps seeing no carrier.
-func TestConfigurePodLinksPreservesAdminDown(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges. Run test with sudo")
-	}
-
-	ns1, err := testutils.NewNS()
-	if err != nil {
-		t.Fatalf("Failed to create ns1: %v", err)
-	}
-	defer func() { _ = ns1.Close() }()
-	ns2, err := testutils.NewNS()
-	if err != nil {
-		t.Fatalf("Failed to create ns2: %v", err)
-	}
-	defer func() { _ = ns2.Close() }()
-
-	links1 := []wireutil.PodLinkConfig{{
-		PodName: "p1", PeerPodName: "p2", LinkUID: 1, KubeNs: "testns", LocalIntf: "eth1",
-	}}
-	links2 := []wireutil.PodLinkConfig{{
-		PodName: "p2", PeerPodName: "p1", LinkUID: 1, KubeNs: "testns", LocalIntf: "eth1",
-	}}
-	reconcile := func() {
-		t.Helper()
-		if err := wireutil.ConfigurePodLinks(ns1.Path(), links1); err != nil {
-			t.Fatalf("ConfigurePodLinks(p1) failed: %v", err)
-		}
-		if err := wireutil.ConfigurePodLinks(ns2.Path(), links2); err != nil {
-			t.Fatalf("ConfigurePodLinks(p2) failed: %v", err)
-		}
-	}
-	const upAndCarrier = unix.IFF_UP | unix.IFF_LOWER_UP
-
-	reconcile()
-	if got := linkFlags(t, ns1, "eth1") & upAndCarrier; got != upAndCarrier {
-		t.Fatalf("after plumbing, p1 eth1 flags&(UP|LOWER_UP) = %#x, want %#x", got, upAndCarrier)
-	}
-
-	// The workload in p1 shuts the port down; reconciles must not bring it back up.
-	setAdmin(t, ns1, "eth1", false)
-	reconcile()
-	reconcile()
-	if got := linkFlags(t, ns1, "eth1") & unix.IFF_UP; got != 0 {
-		t.Errorf("after reconcile, p1 eth1 is admin up, want it left admin down")
-	}
-	if got := linkFlags(t, ns2, "eth1") & upAndCarrier; got != unix.IFF_UP {
-		t.Errorf("after reconcile, p2 eth1 flags&(UP|LOWER_UP) = %#x, want %#x (admin up, no carrier)", got, unix.IFF_UP)
-	}
-
-	// The workload brings the port back up; the peer regains carrier.
-	setAdmin(t, ns1, "eth1", true)
-	reconcile()
-	if got := linkFlags(t, ns2, "eth1") & upAndCarrier; got != upAndCarrier {
-		t.Errorf("after admin up, p2 eth1 flags&(UP|LOWER_UP) = %#x, want %#x", got, upAndCarrier)
+	if len(a) > unix.IFNAMSIZ-1 || len(vx) > unix.IFNAMSIZ-1 {
+		t.Fatalf("names %s and %s do not fit an interface name", a, vx)
 	}
 }
 
@@ -206,6 +48,18 @@ func linkFlags(t *testing.T, netNS ns.NetNS, name string) uint32 {
 	return flags
 }
 
+func linkIndex(t *testing.T, netNS ns.NetNS, name string) int {
+	t.Helper()
+	index := 0
+	_ = netNS.Do(func(_ ns.NetNS) error {
+		if l, err := netlink.LinkByName(name); err == nil {
+			index = l.Attrs().Index
+		}
+		return nil
+	})
+	return index
+}
+
 func setAdmin(t *testing.T, netNS ns.NetNS, name string, up bool) {
 	t.Helper()
 	if err := netNS.Do(func(_ ns.NetNS) error {
@@ -219,5 +73,178 @@ func setAdmin(t *testing.T, netNS ns.NetNS, name string, up bool) {
 		return netlink.LinkSetDown(l)
 	}); err != nil {
 		t.Fatalf("setting %s admin up=%t: %v", name, up, err)
+	}
+}
+
+// udpReaches says whether a datagram sent from the netns from to toIP arrives in the netns to.
+func udpReaches(t *testing.T, from, to ns.NetNS, toIP string) bool {
+	t.Helper()
+	var conn *net.UDPConn
+	if err := to.Do(func(_ ns.NetNS) error {
+		var err error
+		conn, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(toIP), Port: 9999})
+		return err
+	}); err != nil {
+		t.Fatalf("listening on %s: %v", toIP, err)
+	}
+	defer conn.Close()
+	got := make(chan bool, 1)
+	go func() {
+		buf := make([]byte, 16)
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _, err := conn.ReadFromUDP(buf)
+		got <- err == nil
+	}()
+	_ = from.Do(func(_ ns.NetNS) error {
+		c, err := net.Dial("udp4", toIP+":9999")
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		// The first ones may go while the neighbour is being resolved.
+		for i := 0; i < 10; i++ {
+			_, _ = c.Write([]byte("hello"))
+			time.Sleep(100 * time.Millisecond)
+		}
+		return nil
+	})
+	return <-got
+}
+
+func newNS(t *testing.T) ns.NetNS {
+	t.Helper()
+	n, err := testutils.NewNS()
+	if err != nil {
+		t.Fatalf("creating a netns: %v", err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+	return n
+}
+
+func ensure(t *testing.T, netNS ns.NetNS, pod, peer, intf, ip string, uid int64) wireutil.PodEnd {
+	t.Helper()
+	cfg := wireutil.PodLinkConfig{PodName: pod, PeerPodName: peer, LinkUID: uid, KubeNs: "ends", LocalIntf: intf, LocalIP: ip}
+	end := wireutil.NewPodEnd(netNS.Path(), cfg, 1450)
+	if _, err := wireutil.EnsurePodEnd(end); err != nil {
+		t.Fatalf("EnsurePodEnd(%s/%s): %v", pod, intf, err)
+	}
+	t.Cleanup(func() { _ = wireutil.RemoveHostLink(end.Host) })
+	return end
+}
+
+// A pod end is made once, paired with its node end, kept on later calls, and made again when the
+// name is held by something else: a direct pair to another pod (the previous wiring) or a leftover.
+func TestEnsurePodEnd(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	nsA, nsB := newNS(t), newNS(t)
+
+	end := ensure(t, nsA, "a", "b", "eth1", "10.50.0.1/30", 1)
+	first := linkIndex(t, nsA, "eth1")
+	if first == 0 || !wireutil.HostLinkExists(end.Host) {
+		t.Fatalf("after the first call: eth1 ifindex %d, node end %s present %t", first, end.Host, wireutil.HostLinkExists(end.Host))
+	}
+	if got := linkFlags(t, nsA, "eth1") & unix.IFF_UP; got == 0 {
+		t.Errorf("a new pod end must come up")
+	}
+	if got := linkFlags(t, nsA, "eth1") & unix.IFF_LOWER_UP; got != 0 {
+		t.Errorf("a pod end must have no carrier while its node end is down")
+	}
+	ensure(t, nsA, "a", "b", "eth1", "10.50.0.1/30", 1)
+	if got := linkIndex(t, nsA, "eth1"); got != first {
+		t.Errorf("a second call remade eth1 (ifindex %d, was %d)", got, first)
+	}
+
+	// The workload shuts the port; a later call must leave it down.
+	setAdmin(t, nsA, "eth1", false)
+	ensure(t, nsA, "a", "b", "eth1", "10.50.0.1/30", 1)
+	if got := linkFlags(t, nsA, "eth1") & unix.IFF_UP; got != 0 {
+		t.Errorf("a call brought up a port the workload had shut")
+	}
+
+	// The previous wiring: a direct pair between the two pods.
+	if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "oldx"}, PeerName: "oldy"}); err != nil {
+		t.Fatalf("making the old pair: %v", err)
+	}
+	for name, target := range map[string]ns.NetNS{"oldx": nsA, "oldy": nsB} {
+		l, _ := netlink.LinkByName(name)
+		if err := netlink.LinkSetNsFd(l, int(target.Fd())); err != nil {
+			t.Fatalf("moving %s: %v", name, err)
+		}
+		if err := target.Do(func(_ ns.NetNS) error {
+			l, err := netlink.LinkByName(name)
+			if err != nil {
+				return err
+			}
+			return netlink.LinkSetName(l, "eth2")
+		}); err != nil {
+			t.Fatalf("renaming %s: %v", name, err)
+		}
+	}
+	end2 := ensure(t, nsA, "a", "b", "eth2", "", 2)
+	if v, err := netlink.LinkByName(end2.Host); err != nil {
+		t.Fatalf("node end of eth2: %v", err)
+	} else if peer, err := netlink.VethPeerIndex(v.(*netlink.Veth)); err != nil || peer != linkIndex(t, nsA, "eth2") {
+		t.Errorf("eth2 is not paired with its node end (peer %d, eth2 %d, %v)", peer, linkIndex(t, nsA, "eth2"), err)
+	}
+	if linkIndex(t, nsB, "eth2") != 0 {
+		t.Errorf("the other end of the old pair is still in b")
+	}
+
+	// A leftover of another kind under the name.
+	if err := nsA.Do(func(_ ns.NetNS) error {
+		return netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "eth3"}})
+	}); err != nil {
+		t.Fatalf("planting a leftover: %v", err)
+	}
+	ensure(t, nsA, "a", "b", "eth3", "", 3)
+	var kind string
+	_ = nsA.Do(func(_ ns.NetNS) error {
+		l, err := netlink.LinkByName("eth3")
+		if err == nil {
+			kind = l.Type()
+		}
+		return nil
+	})
+	if kind != "veth" {
+		t.Errorf("eth3 is %q, want the leftover replaced by a veth", kind)
+	}
+}
+
+// Two pod ends on one node joined through their node ends carry frames, and each pod's carrier is
+// its node end's admin state, which is what the daemon sets.
+func TestJoinHostEnds(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	nsA, nsB := newNS(t), newNS(t)
+	a := ensure(t, nsA, "a", "b", "eth1", "10.51.0.1/30", 1)
+	b := ensure(t, nsB, "b", "a", "eth1", "10.51.0.2/30", 1)
+	if err := wireutil.JoinHostEnds(a.Host, b.Host); err != nil {
+		t.Fatalf("JoinHostEnds: %v", err)
+	}
+	for _, h := range []string{a.Host, b.Host} {
+		if err := wireutil.SetHostEndUp(h, true); err != nil {
+			t.Fatalf("SetHostEndUp(%s): %v", h, err)
+		}
+	}
+	if got := linkFlags(t, nsA, "eth1") & unix.IFF_LOWER_UP; got == 0 {
+		t.Fatalf("a eth1 has no carrier with its node end up")
+	}
+	if !udpReaches(t, nsA, nsB, "10.51.0.2") {
+		t.Fatalf("a datagram from a did not reach b through the joined node ends")
+	}
+	if !udpReaches(t, nsB, nsA, "10.51.0.1") {
+		t.Fatalf("a datagram from b did not reach a through the joined node ends")
+	}
+	if err := wireutil.SetHostEndUp(a.Host, false); err != nil {
+		t.Fatalf("SetHostEndUp(down): %v", err)
+	}
+	if got := linkFlags(t, nsA, "eth1") & unix.IFF_LOWER_UP; got != 0 {
+		t.Errorf("a eth1 keeps its carrier with its node end down")
+	}
+	if !wireutil.PodEndAdminUp(nsA.Path(), "eth1") {
+		t.Errorf("a eth1 must stay admin up, only its carrier goes")
 	}
 }

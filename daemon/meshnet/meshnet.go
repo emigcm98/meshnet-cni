@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
@@ -46,6 +47,11 @@ type Meshnet struct {
 	nodeIntf       string
 	topoCache      *TopologyCache
 	reconcileQueue *ReconcileQueue
+	// defaultMTU is what a link that asks for none gets: what a vxlan over nodeIntf carries.
+	defaultMTU int
+	// joins are the same-node joins by node end, for the carrier watcher.
+	joinsMu sync.Mutex
+	joins   map[string]hostJoin
 }
 
 var mnetdLogger = log.WithFields(log.Fields{"daemon": "meshnetd"})
@@ -105,7 +111,11 @@ func New(cfg Config) (*Meshnet, error) {
 		mnetdLogger.Warnf("could not resolve the VXLAN source interface: %v", err)
 		nodeIP = os.Getenv("HOST_IP")
 	}
-	mnetdLogger.Infof("Node address %s, VXLAN source interface %q", nodeIP, nodeIntf)
+	if nodeIntf == "" {
+		nodeIntf = wireutil.DefaultRouteInterface()
+	}
+	defaultMTU := wireutil.VxlanMTU(nodeIntf)
+	mnetdLogger.Infof("Node address %s, VXLAN source interface %q, default link MTU %d", nodeIP, nodeIntf, defaultMTU)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
 	if err != nil {
@@ -122,6 +132,7 @@ func New(cfg Config) (*Meshnet, error) {
 		s:              newServerWithLogging(cfg.GRPCOpts...),
 		nodeIP:         nodeIP,
 		nodeIntf:       nodeIntf,
+		defaultMTU:     defaultMTU,
 		topoCache:      NewTopologyCache(),
 		reconcileQueue: NewReconcileQueue(50 * time.Millisecond),
 	}
