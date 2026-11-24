@@ -60,6 +60,30 @@ type Link struct {
 	// Unplugged pulls the cable: both ends lose carrier and keep their configuration. Either end
 	// declaring it unplugs the link.
 	Unplugged bool `json:"unplugged,omitempty"`
+	// Shaping of the traffic the local end sends, applied on the way to the peer.
+	Shaping *Shaping `json:"shaping,omitempty"`
+}
+
+// Shaping is a netem (the default) or a tbf for one direction of a link, with tc's units: times as
+// 100ms, percentages as 1%, rates as 10mbit, sizes as 32kbit.
+type Shaping struct {
+	Qdisc string `json:"qdisc,omitempty"`
+	// netem
+	Delay              string `json:"delay,omitempty"`
+	Jitter             string `json:"jitter,omitempty"`
+	DelayCorrelation   string `json:"delay_correlation,omitempty"`
+	Loss               string `json:"loss,omitempty"`
+	LossCorrelation    string `json:"loss_correlation,omitempty"`
+	Duplicate          string `json:"duplicate,omitempty"`
+	Corrupt            string `json:"corrupt,omitempty"`
+	Reorder            string `json:"reorder,omitempty"`
+	ReorderCorrelation string `json:"reorder_correlation,omitempty"`
+	Limit              int    `json:"limit,omitempty"`
+	// Rate is netem's link rate, or tbf's rate, which tbf requires.
+	Rate string `json:"rate,omitempty"`
+	// tbf
+	Burst   string `json:"burst,omitempty"`
+	Latency string `json:"latency,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

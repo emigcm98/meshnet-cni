@@ -67,6 +67,39 @@ func TestMacvlanLifecycle(t *testing.T) {
 		t.Fatalf("second MakeMacvlan must leave the existing one alone: created %t, %v", created, err)
 	}
 
+	// An uplink has no node end: its shaping goes on the interface in the pod, and comes off with it.
+	rootKind := func() string {
+		kind := ""
+		in(t, podNs, "reading the uplink's qdisc", func() error {
+			l, err := netlink.LinkByName("eth1")
+			if err != nil {
+				return err
+			}
+			qdiscs, err := netlink.QdiscList(l)
+			for _, q := range qdiscs {
+				if q.Attrs().Parent == netlink.HANDLE_ROOT && q.Type() != "noqueue" {
+					kind = q.Type()
+				}
+			}
+			return err
+		})
+		return kind
+	}
+	cfg.Shaping = &wireutil.Shaping{Delay: "10ms"}
+	if err := wireutil.Declare(podNs.Path(), "eth1", 9, "localhost", wireutil.NewUplinkDeclared(cfg), false); err != nil {
+		t.Fatalf("Declare with a shaping: %v", err)
+	}
+	if got := rootKind(); got != "netem" {
+		t.Errorf("uplink eth1 root qdisc %q, want the declared netem", got)
+	}
+	cfg.Shaping = nil
+	if err := wireutil.Declare(podNs.Path(), "eth1", 9, "localhost", wireutil.NewUplinkDeclared(cfg), false); err != nil {
+		t.Fatalf("Declare without a shaping: %v", err)
+	}
+	if got := rootKind(); got != "" {
+		t.Errorf("uplink eth1 keeps %q with its shaping dropped", got)
+	}
+
 	if err := wireutil.RemoveLink(podNs.Path(), "eth1"); err != nil {
 		t.Fatalf("RemoveLink: %v", err)
 	}

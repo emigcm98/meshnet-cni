@@ -32,7 +32,7 @@ spec:
     mtu: 1400
 ```
 
-A link whose `peer_pod` is `localhost` is a macvlan on the node interface named by `peer_intf`. The `uid` must be unique on a node across namespaces, since the kernel refuses a second VXLAN with a VNI already in use. The rest is optional and describes the local end, from the pod's own `Topology`: `addresses`, a list of either family beyond `local_ip`; `mac`; `mtu`, where both ends get the larger of the two requests; `txqueuelen`; `offloads: true` to keep the kernel's transmit offloads, switched off otherwise; and `unplugged: true`, the cable pulled, which either end can declare: both pods keep their interfaces administratively up, with their configuration, and lose carrier until it is plugged back, on one node as across nodes. An uplink has no cable to unplug. `tests/` holds topologies for two, three and five nodes, one with several links between the same pair, and the macvlan case.
+A link whose `peer_pod` is `localhost` is a macvlan on the node interface named by `peer_intf`. The `uid` must be unique on a node across namespaces, since the kernel refuses a second VXLAN with a VNI already in use. The rest is optional and describes the local end, from the pod's own `Topology`: `addresses`, a list of either family beyond `local_ip`; `mac`; `mtu`, where both ends get the larger of the two requests; `txqueuelen`; `offloads: true` to keep the kernel's transmit offloads, switched off otherwise; and `unplugged: true`, the cable pulled, which either end can declare: both pods keep their interfaces administratively up, with their configuration, and lose carrier until it is plugged back, on one node as across nodes. An uplink has no cable to unplug. `shaping` is a netem or a tbf for the traffic the local end sends, with tc's units, as in `shaping: {delay: 20ms, jitter: 2ms, loss: 0.5%, rate: 10mbit}` or `shaping: {qdisc: tbf, rate: 10mbit, burst: 32kbit, latency: 50ms}`; the netem fields are `delay`, `jitter`, `delay_correlation`, `loss`, `loss_correlation`, `duplicate`, `corrupt`, `reorder`, `reorder_correlation`, `limit` and `rate`. It is put on the node end of the other side, so it shapes the link in that direction alone, on one node as across nodes, out of the workload's sight and apart from its own qdiscs; the daemon keeps it there, changes it in place when the declaration changes, and puts it back on a recreated pod's new node end. An uplink's shaping goes on the interface in the pod, as part of its declaration. An invalid shaping is reported in `status.plumbing_error` and leaves the last valid one in place, without keeping the link from being wired. `tests/` holds topologies for two, three and five nodes, one with several links between the same pair, and the macvlan case.
 
 ## Install
 
@@ -58,6 +58,7 @@ make eviction    # tests/eviction.sh: a pod recreated on its peer's worker and b
 make live-links  # tests/live-links.sh: links added to and removed from running pods
 make off-links   # tests/off-links.sh: neighbours switched off and on, a port shut, the survivor's interfaces kept
 make declared    # tests/declared.sh: the interface as declared, a cable unplugged, live changes, the workload's kept
+make shaping     # tests/shaping.sh: delay, loss and rate per direction, on one node and across nodes, changed live
 make down
 ```
 

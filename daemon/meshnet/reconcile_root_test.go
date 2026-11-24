@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -556,5 +557,83 @@ func TestReconcileDeclaredLive(t *testing.T) {
 	}
 	if l.Attrs().MTU != 1300 {
 		t.Errorf("a eth1 MTU %d: the workload's 1300 must stay while the declared MTU does not change", l.Attrs().MTU)
+	}
+}
+
+// rootQdiscType is the kind of the root qdisc of the node end name, empty for the veth's default.
+func rootQdiscType(t *testing.T, name string) string {
+	t.Helper()
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		t.Fatalf("node end %s: %v", name, err)
+	}
+	qdiscs, _ := netlink.QdiscList(l)
+	for _, q := range qdiscs {
+		if q.Attrs().Parent == netlink.HANDLE_ROOT && q.Type() != "noqueue" {
+			return q.Type()
+		}
+	}
+	return ""
+}
+
+// What an end declares it sends is shaped on the node end of the other side, on one node and across
+// nodes, follows the declaration, and an invalid one is reported without keeping the link unwired.
+func TestReconcileShaping(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	InitLogger()
+	dummy(t, "vteptest2")
+	nsA, nsB := newNS(t), newNS(t)
+	defer nsA.Close()
+	defer nsB.Close()
+	link := func(uid int64, peer, local, peerIntf, ip string, shaping map[string]interface{}) map[string]interface{} {
+		l := map[string]interface{}{"uid": uid, "peer_pod": peer, "local_intf": local, "peer_intf": peerIntf, "local_ip": ip}
+		if shaping != nil {
+			l["shaping"] = shaping
+		}
+		return l
+	}
+	c := topologyWithLinks("c", "10.0.0.2", "/var/run/netns/elsewhere",
+		link(25, "a", "eth1", "eth2", "10.25.0.3/30", map[string]interface{}{"loss": "5%"}))
+	topos := func(bShaping map[string]interface{}) []*unstructured.Unstructured {
+		return []*unstructured.Unstructured{
+			topologyWithLinks("a", "10.0.0.1", nsA.Path(), link(24, "b", "eth1", "eth1", "10.24.0.1/30", nil), link(25, "c", "eth2", "eth1", "10.25.0.1/30", nil)),
+			topologyWithLinks("b", "10.0.0.1", nsB.Path(), link(24, "a", "eth1", "eth1", "10.24.0.2/30", bShaping)),
+		}
+	}
+	m := newTestMeshnet(t, append(topos(map[string]interface{}{"delay": "20ms"}), c)...)
+	m.nodeIntf = "vteptest2"
+	m.mustReconcile(t, topos(map[string]interface{}{"delay": "20ms"})...)
+	hostA24, hostB24 := wireutil.HostEndName("default", "a", 24), wireutil.HostEndName("default", "b", 24)
+	hostA25 := wireutil.HostEndName("default", "a", 25)
+	if got := rootQdiscType(t, hostA24); got != "netem" {
+		t.Errorf("what b sends towards a is not shaped on a's node end: %q", got)
+	}
+	if got := rootQdiscType(t, hostB24); got != "" {
+		t.Errorf("b's node end got %q, but a declares nothing for what it sends", got)
+	}
+	if got := rootQdiscType(t, hostA25); got != "netem" {
+		t.Errorf("what c sends from another node is not shaped on a's node end: %q", got)
+	}
+
+	m.mustReconcile(t, topos(map[string]interface{}{"qdisc": "tbf", "rate": "1mbit"})...)
+	if got := rootQdiscType(t, hostA24); got != "tbf" {
+		t.Errorf("b's new shaping did not reach a's node end: %q", got)
+	}
+	m.mustReconcile(t, topos(nil)...)
+	if got := rootQdiscType(t, hostA24); got != "" {
+		t.Errorf("a's node end keeps %q after b dropped its shaping", got)
+	}
+
+	// An invalid shaping is in the pod's plumbing error, and the link is wired all the same.
+	bad := topos(map[string]interface{}{"jitter": "5ms"})
+	m.topoCache.Put(bad[1])
+	err := m.ReconcilePodLinks(context.Background(), bad[0])
+	if err == nil || !strings.Contains(err.Error(), "a jitter needs a delay") {
+		t.Errorf("an invalid shaping reconciled with %v, want its error", err)
+	}
+	if !carrier(nsA, "eth1") || !carrier(nsA, "eth2") {
+		t.Errorf("an invalid shaping kept the links of a from being wired")
 	}
 }

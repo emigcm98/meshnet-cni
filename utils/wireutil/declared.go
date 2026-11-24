@@ -27,6 +27,7 @@ const (
 	propMTU       = "u"
 	propTxQLen    = "q"
 	propOffloads  = "o"
+	propShaping   = "s"
 )
 
 // Declared is what a link declares of its end in a pod. It is applied when the interface is made and
@@ -37,9 +38,11 @@ type Declared struct {
 	MTU       int  // the link's, already settled between both ends
 	TxQLen    int  // the link's, or LINK_TXQUEUELEN
 	Offloads  bool // keep the kernel's tx offloads
-	// kernelOffloads leaves the offloads as the kernel has them unless Offloads asks to keep them,
-	// for an uplink, which meshnet never switched off.
-	kernelOffloads bool
+	// Shaping of what the interface sends, for an uplink, which has no node end to carry it.
+	Shaping *Shaping
+	// uplink leaves the offloads as the kernel has them unless Offloads asks to keep them, since
+	// meshnet never switched an uplink's off, and puts the shaping on the interface itself.
+	uplink bool
 }
 
 // NewDeclared settles what cfg declares of its end: mtu is the link's, and the queue length falls
@@ -59,7 +62,7 @@ func NewDeclared(cfg PodLinkConfig, mtu int) Declared {
 // NewUplinkDeclared settles what cfg declares of an uplink: what it does not declare, its MTU, queue
 // length and offloads, stays the kernel's.
 func NewUplinkDeclared(cfg PodLinkConfig) Declared {
-	d := Declared{MAC: cfg.MAC, MTU: cfg.MTU, TxQLen: cfg.TxQLen, Offloads: cfg.Offloads, kernelOffloads: true}
+	d := Declared{MAC: cfg.MAC, MTU: cfg.MTU, TxQLen: cfg.TxQLen, Offloads: cfg.Offloads, Shaping: cfg.Shaping, uplink: true}
 	if cfg.LocalIP != "" {
 		d.Addresses = append(d.Addresses, cfg.LocalIP)
 	}
@@ -92,6 +95,7 @@ func (d Declared) Digests() Digests {
 		propMTU:       digest(strconv.Itoa(d.MTU)),
 		propTxQLen:    digest(strconv.Itoa(d.TxQLen)),
 		propOffloads:  digest(strconv.FormatBool(d.Offloads)),
+		propShaping:   digest(d.Shaping.String()),
 	}
 }
 
@@ -192,12 +196,17 @@ func applyDeclared(l netlink.Link, d Declared, prev, cur Digests) error {
 			log.Warnf("Declare: failed to set txqueuelen %d on %s: %v", d.TxQLen, l.Attrs().Name, err)
 		}
 	}
-	if apply(propOffloads) && !(d.kernelOffloads && !d.Offloads) {
+	if apply(propOffloads) && !(d.uplink && !d.Offloads) {
 		if h, _ := ethtool.NewEthtool(); h != nil {
 			if err := setTxOffload(h, l.Attrs().Name, d.Offloads); err != nil {
 				log.Warnf("Declare: failed to switch the tx offloads of %s %s: %v", l.Attrs().Name, onOff(d.Offloads), err)
 			}
 			h.Close()
+		}
+	}
+	if apply(propShaping) && d.uplink {
+		if err := setRootShaping(l, d.Shaping); err != nil {
+			return fmt.Errorf("shaping: %w", err)
 		}
 	}
 	if apply(propAddresses) {

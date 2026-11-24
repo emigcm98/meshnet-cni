@@ -23,6 +23,7 @@ type PodLinkConfig struct {
 	TxQLen      int      // queue length of the local end, zero for LINK_TXQUEUELEN
 	Offloads    bool     // keep the kernel's tx offloads on the local end
 	Unplugged   bool     // the cable pulled, as the local end declares it
+	Shaping     *Shaping // of the traffic the local end sends
 }
 
 var txOffloadDisabledMap = map[string]bool{
