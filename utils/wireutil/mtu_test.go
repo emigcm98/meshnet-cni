@@ -132,5 +132,9 @@ func TestEnsurePodEndMTU(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Failed to inspect %s: %v", cfg.LocalIntf, err)
 		}
+		// The node end never limits the link: the pod ends decide its MTU.
+		if h, err := netlink.LinkByName(end.Host); err != nil || h.Attrs().MTU != wireutil.HostEndMTU {
+			t.Errorf("node end %s: %v, want MTU %d", end.Host, err, wireutil.HostEndMTU)
+		}
 	}
 }

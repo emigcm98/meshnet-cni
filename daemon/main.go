@@ -10,7 +10,6 @@ import (
 
 	"github.com/emigcm98/meshnet-cni/daemon/cni"
 	"github.com/emigcm98/meshnet-cni/daemon/meshnet"
-	"github.com/emigcm98/meshnet-cni/daemon/vxlan"
 	"github.com/emigcm98/meshnet-cni/utils/wireutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -38,7 +37,6 @@ func main() {
 	}
 
 	meshnet.InitLogger()
-	vxlan.InitLogger()
 
 	m, err := meshnet.New(meshnet.Config{
 		Port: grpcPort,

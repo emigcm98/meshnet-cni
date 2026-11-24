@@ -79,7 +79,7 @@ func hasAddr(netNS ns.NetNS, name, cidr string) bool {
 		if err != nil {
 			return nil
 		}
-		addrs, _ := netlink.AddrList(l, netlink.FAMILY_V4)
+		addrs, _ := netlink.AddrList(l, netlink.FAMILY_ALL)
 		for _, a := range addrs {
 			if a.IPNet.String() == cidr {
 				found = true
@@ -442,5 +442,119 @@ func TestEnqueuePodAndDependents(t *testing.T) {
 	}
 	if len(got) != 2 || !got["default/moved"] || !got["default/here"] {
 		t.Fatalf("queued %v, want default/moved and default/here (default/elsewhere runs on another node)", keys)
+	}
+}
+
+// An unplugged link is a pulled cable: both pods keep their interfaces administratively up and see
+// no carrier, on one node and across nodes, and plugging it back brings the carrier and the frames.
+// Either end declaring it unplugs the link.
+func TestReconcileUnplugged(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	InitLogger()
+	dummy(t, "vteptest1")
+	nsA, nsB := newNS(t), newNS(t)
+	defer nsA.Close()
+	defer nsB.Close()
+	linkAB := map[string]interface{}{"uid": int64(21), "peer_pod": "b", "local_intf": "eth1", "peer_intf": "eth1", "local_ip": "10.21.0.1/30"}
+	linkBA := map[string]interface{}{"uid": int64(21), "peer_pod": "a", "local_intf": "eth1", "peer_intf": "eth1", "local_ip": "10.21.0.2/30"}
+	linkAC := map[string]interface{}{"uid": int64(22), "peer_pod": "c", "local_intf": "eth2", "peer_intf": "eth1", "local_ip": "10.22.0.1/30"}
+	linkCA := map[string]interface{}{"uid": int64(22), "peer_pod": "a", "local_intf": "eth1", "peer_intf": "eth2", "local_ip": "10.22.0.3/30"}
+	with := func(l map[string]interface{}, unplugged bool) map[string]interface{} {
+		out := make(map[string]interface{}, len(l)+1)
+		for k, v := range l {
+			out[k] = v
+		}
+		if unplugged {
+			out["unplugged"] = true
+		}
+		return out
+	}
+	c := topologyWithLinks("c", "10.0.0.2", "/var/run/netns/elsewhere", linkCA)
+	topos := func(unplugAB, unplugAC bool) []*unstructured.Unstructured {
+		return []*unstructured.Unstructured{
+			topologyWithLinks("a", "10.0.0.1", nsA.Path(), linkAB, with(linkAC, unplugAC)),
+			// The link to b is unplugged from b's side only: either end pulls the cable.
+			topologyWithLinks("b", "10.0.0.1", nsB.Path(), with(linkBA, unplugAB)),
+		}
+	}
+	m := newTestMeshnet(t, append(topos(false, false), c)...)
+	m.nodeIntf = "vteptest1"
+	m.mustReconcile(t, topos(false, false)...)
+	if !carrier(nsA, "eth1") || !carrier(nsB, "eth1") || !carrier(nsA, "eth2") {
+		t.Fatalf("plugged links have no carrier")
+	}
+	kept := linkIndex(t, nsA, "eth1")
+
+	m.mustReconcile(t, topos(true, true)...)
+	for _, end := range []struct {
+		n    ns.NetNS
+		intf string
+	}{{nsA, "eth1"}, {nsB, "eth1"}, {nsA, "eth2"}} {
+		if carrier(end.n, end.intf) {
+			t.Errorf("%s keeps its carrier with the cable unplugged", end.intf)
+		}
+		if !wireutil.PodEndAdminUp(end.n.Path(), end.intf) {
+			t.Errorf("%s must stay admin up with the cable unplugged", end.intf)
+		}
+	}
+	// The carrier watcher's own pass must not plug it back.
+	m.syncCarrier(wireutil.HostEndName("default", "a", 21))
+	if carrier(nsA, "eth1") || carrier(nsB, "eth1") {
+		t.Errorf("syncCarrier plugged an unplugged link back")
+	}
+
+	m.mustReconcile(t, topos(false, false)...)
+	if got := linkIndex(t, nsA, "eth1"); got != kept {
+		t.Fatalf("a eth1 was remade by plugging the cable back (ifindex %d, was %d)", got, kept)
+	}
+	if !carrier(nsA, "eth1") || !carrier(nsB, "eth1") || !carrier(nsA, "eth2") {
+		t.Fatalf("plugged back, the links have no carrier")
+	}
+	if !udpReaches(t, nsA, nsB, "10.21.0.2") {
+		t.Fatalf("a datagram from a did not reach b after plugging the cable back")
+	}
+}
+
+// The declaration of a link reaches a running pod: a new MAC and a new address list are applied
+// by the next reconcile, and what the workload changed of the rest stays.
+func TestReconcileDeclaredLive(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	InitLogger()
+	nsA, nsB := newNS(t), newNS(t)
+	defer nsA.Close()
+	defer nsB.Close()
+	linkA := map[string]interface{}{"uid": int64(23), "peer_pod": "b", "local_intf": "eth1", "peer_intf": "eth1", "local_ip": "10.23.0.1/30",
+		"addresses": []interface{}{"fd23::1/64"}, "mac": "02:23:00:00:00:01", "mtu": int64(1400)}
+	linkB := map[string]interface{}{"uid": int64(23), "peer_pod": "a", "local_intf": "eth1", "peer_intf": "eth1", "local_ip": "10.23.0.2/30"}
+	a := topologyWithLinks("a", "10.0.0.1", nsA.Path(), linkA)
+	b := topologyWithLinks("b", "10.0.0.1", nsB.Path(), linkB)
+	m := newTestMeshnet(t, a, b)
+	m.mustReconcile(t, a, b)
+	l := linkOf(nsA, "eth1")
+	if l == nil || l.Attrs().HardwareAddr.String() != "02:23:00:00:00:01" || l.Attrs().MTU != 1400 || !hasAddr(nsA, "eth1", "fd23::1/64") {
+		t.Fatalf("a eth1 was not born as declared: %+v", l)
+	}
+	if lb := linkOf(nsB, "eth1"); lb == nil || lb.Attrs().MTU != 1400 {
+		t.Fatalf("b eth1 does not have the MTU a declared for the link")
+	}
+
+	// The workload lowers a's MTU by hand.
+	if err := nsA.Do(func(_ ns.NetNS) error { return netlink.LinkSetMTU(linkOf(nsA, "eth1"), 1300) }); err != nil {
+		t.Fatalf("lowering the MTU: %v", err)
+	}
+	linkA2 := map[string]interface{}{"uid": int64(23), "peer_pod": "b", "local_intf": "eth1", "peer_intf": "eth1", "local_ip": "10.23.0.1/30",
+		"addresses": []interface{}{"fd23::5/64"}, "mac": "02:23:00:00:00:05", "mtu": int64(1400)}
+	m.mustReconcile(t, topologyWithLinks("a", "10.0.0.1", nsA.Path(), linkA2), b)
+	l = linkOf(nsA, "eth1")
+	if l.Attrs().HardwareAddr.String() != "02:23:00:00:00:05" || hasAddr(nsA, "eth1", "fd23::1/64") || !hasAddr(nsA, "eth1", "fd23::5/64") {
+		t.Errorf("a eth1 did not take its new MAC and addresses: mac %s, fd23::1 %t, fd23::5 %t",
+			l.Attrs().HardwareAddr, hasAddr(nsA, "eth1", "fd23::1/64"), hasAddr(nsA, "eth1", "fd23::5/64"))
+	}
+	if l.Attrs().MTU != 1300 {
+		t.Errorf("a eth1 MTU %d: the workload's 1300 must stay while the declared MTU does not change", l.Attrs().MTU)
 	}
 }

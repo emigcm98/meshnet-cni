@@ -9,15 +9,20 @@ import (
 
 // PodLinkConfig describes a single interface to be configured inside a pod network namespace.
 type PodLinkConfig struct {
-	PodName     string // Local pod name (e.g. "p1")
-	PeerPodName string // Peer pod name (e.g. "p2")
-	LinkUID     int64  // Unique link ID in topology (e.g. 14)
-	KubeNs      string // Kubernetes namespace (e.g. "1500links")
-	LocalIntf   string // Target interface name inside local pod (e.g. "eth14")
-	LocalIP     string // Local CIDR (e.g. "10.10.0.1/30")
-	PeerIntf    string // Target interface name inside peer pod (e.g. "eth14")
-	PeerIP      string // Peer CIDR (e.g. "10.10.0.2/30")
-	MTU         int    // Interface MTU, zero when the link asks for none
+	PodName     string   // Local pod name (e.g. "p1")
+	PeerPodName string   // Peer pod name (e.g. "p2")
+	LinkUID     int64    // Unique link ID in topology (e.g. 14)
+	KubeNs      string   // Kubernetes namespace (e.g. "1500links")
+	LocalIntf   string   // Target interface name inside local pod (e.g. "eth14")
+	LocalIP     string   // Local CIDR (e.g. "10.10.0.1/30")
+	PeerIntf    string   // Target interface name inside peer pod (e.g. "eth14")
+	PeerIP      string   // Peer CIDR (e.g. "10.10.0.2/30")
+	MTU         int      // Interface MTU, zero when the link asks for none
+	Addresses   []string // CIDRs of the local end beyond LocalIP
+	MAC         string   // MAC of the local end, empty for the kernel's
+	TxQLen      int      // queue length of the local end, zero for LINK_TXQUEUELEN
+	Offloads    bool     // keep the kernel's tx offloads on the local end
+	Unplugged   bool     // the cable pulled, as the local end declares it
 }
 
 var txOffloadDisabledMap = map[string]bool{

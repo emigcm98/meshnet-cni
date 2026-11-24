@@ -33,7 +33,6 @@ type Config struct {
 
 type Meshnet struct {
 	mpb.UnimplementedLocalServer
-	mpb.UnimplementedRemoteServer
 	config    Config
 	kClient   kubernetes.Interface
 	tClient   topologyclientv1.Interface
@@ -137,7 +136,6 @@ func New(cfg Config) (*Meshnet, error) {
 		reconcileQueue: NewReconcileQueue(50 * time.Millisecond),
 	}
 	mpb.RegisterLocalServer(m.s, m)
-	mpb.RegisterRemoteServer(m.s, m)
 	reflection.Register(m.s)
 
 	return m, nil

@@ -29,35 +29,11 @@ message PodQuery {
   string kube_ns = 2;
 }
 
-message SkipQuery {
-  string pod = 1;
-  string peer = 2;
-  string kube_ns = 3;
-  int64 link_id = 4;
-}
-
 message BoolResponse {
   bool response = 1;
-}
-
-message RemotePod {
-  string net_ns = 1;
-  string intf_name = 2;
-  string intf_ip = 3;
-  string peer_vtep = 4;
-  string kube_ns = 5;
-  int64 vni = 6;
-  string node_intf = 7;
 }
 
 service Local {
   rpc Get (PodQuery) returns (Pod);
   rpc SetAlive (Pod) returns (BoolResponse);
-  rpc SkipReverse (SkipQuery) returns (BoolResponse);
-  rpc Skip (SkipQuery) returns (BoolResponse);
-  rpc IsSkipped (SkipQuery) returns (BoolResponse);
-}
-
-service Remote {
-  rpc Update (RemotePod) returns (BoolResponse);
 }

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/safchain/ethtool"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -26,6 +25,9 @@ const (
 	// LegacyHostVethPrefix names the host veths of the previous wiring, which joined two pods directly.
 	LegacyHostVethPrefix = "vnm-"
 	vxlanPort            = 4789
+	// HostEndMTU is the MTU of every node end, the most a veth takes: the pod ends alone decide the
+	// MTU of a link, as with a direct veth or a cable.
+	HostEndMTU = 65535
 )
 
 func linkHash(kubeNs, pod string, uid int64) string {
@@ -61,31 +63,33 @@ func HostEndOfVxlan(name string) string {
 
 // PodEnd describes the interface a link gives a pod.
 type PodEnd struct {
-	NetNS string
-	Name  string // the interface in the pod
-	Host  string // its node end, HostEndName
-	Temp  string // the name it has on the node before it moves in
-	IP    string
-	MTU   int
+	NetNS    string
+	Name     string // the interface in the pod
+	Host     string // its node end, HostEndName
+	Temp     string // the name it has on the node before it moves in
+	UID      int64
+	Peer     string
+	Declared Declared
 }
 
-// NewPodEnd fills the node-side names of the end of link cfg in the pod's netns.
+// NewPodEnd fills the node-side names of the end of link cfg in the pod's netns, with the link's mtu.
 func NewPodEnd(netNS string, cfg PodLinkConfig, mtu int) PodEnd {
 	return PodEnd{
-		NetNS: netNS,
-		Name:  cfg.LocalIntf,
-		Host:  HostEndName(cfg.KubeNs, cfg.PodName, cfg.LinkUID),
-		Temp:  podTempName(cfg.KubeNs, cfg.PodName, cfg.LinkUID),
-		IP:    cfg.LocalIP,
-		MTU:   mtu,
+		NetNS:    netNS,
+		Name:     cfg.LocalIntf,
+		Host:     HostEndName(cfg.KubeNs, cfg.PodName, cfg.LinkUID),
+		Temp:     podTempName(cfg.KubeNs, cfg.PodName, cfg.LinkUID),
+		UID:      cfg.LinkUID,
+		Peer:     cfg.PeerPodName,
+		Declared: NewDeclared(cfg, mtu),
 	}
 }
 
 // EnsurePodEnd makes sure the pod has its interface as a veth paired with its node end, and replaces
 // whatever else holds the name: a direct pair to another pod or a vxlan from the previous wiring, or
-// a leftover. It returns whether it made the pair. A new interface is brought up once; from then on
-// its admin state belongs to the workload. The address, the queue length and the offloads are put
-// back on every call.
+// a leftover. It returns whether it made the pair. A new interface gets all of its declaration before
+// it takes its name and comes up, so the workload never sees it half made; from then on its admin
+// state belongs to the workload, and Declare applies only what the declaration changes.
 func EnsurePodEnd(e PodEnd) (bool, error) {
 	podNs, err := ns.GetNS(e.NetNS)
 	if err != nil {
@@ -136,67 +140,49 @@ func EnsurePodEnd(e PodEnd) (bool, error) {
 		if err := makePair(e, podNs); err != nil {
 			return false, err
 		}
-		created = true
+		created, tempInPod = true, true
 	}
 
-	if err := podNs.Do(func(_ ns.NetNS) error {
-		l, err := netlink.LinkByName(e.Temp)
-		renamed := false
-		if err == nil {
-			if err := netlink.LinkSetName(l, e.Name); err != nil {
-				return fmt.Errorf("failed to rename %s -> %s inside %s: %w", e.Temp, e.Name, e.NetNS, err)
-			}
-			renamed = true
+	// The node end is the daemon's: always at HostEndMTU, which also lifts the node ends of 2.8.
+	if h, err := netlink.LinkByName(e.Host); err == nil && h.Attrs().MTU != HostEndMTU {
+		if err := netlink.LinkSetMTU(h, HostEndMTU); err != nil {
+			log.Warnf("EnsurePodEnd: failed to set MTU %d on node end %s: %v", HostEndMTU, e.Host, err)
 		}
-		l, err = netlink.LinkByName(e.Name)
-		if err != nil {
-			return fmt.Errorf("interface %s not found inside netns %s: %w", e.Name, e.NetNS, err)
-		}
-		if renamed {
-			if e.MTU > 0 {
-				if err := netlink.LinkSetMTU(l, e.MTU); err != nil {
-					return fmt.Errorf("failed to set MTU %d on %s: %w", e.MTU, e.Name, err)
-				}
-			}
-			if err := netlink.LinkSetUp(l); err != nil {
-				return fmt.Errorf("failed to set %s up inside %s: %w", e.Name, e.NetNS, err)
-			}
-		}
-		if err := netlink.LinkSetTxQLen(l, GetLinkTxQLen()); err != nil {
-			log.Warnf("EnsurePodEnd: failed to set txqueuelen on %s inside %s: %v", e.Name, e.NetNS, err)
-		}
-		if e.IP != "" {
-			addr, err := netlink.ParseAddr(e.IP)
-			if err != nil {
-				return fmt.Errorf("invalid CIDR %q for %s: %w", e.IP, e.Name, err)
-			}
-			if err := netlink.AddrAdd(l, addr); err != nil && !errors.Is(err, unix.EEXIST) && !os.IsExist(err) {
-				return fmt.Errorf("failed to add IP %s to %s inside %s: %w", e.IP, e.Name, e.NetNS, err)
-			}
-		}
-		if h, _ := ethtool.NewEthtool(); h != nil {
-			if err := disableTxOffload(h, e.Name); err != nil {
-				log.Warnf("EnsurePodEnd: failed to set tx-checksum-off on %s inside %s: %v", e.Name, e.NetNS, err)
-			}
-			h.Close()
-		}
-		return nil
-	}); err != nil {
+	}
+
+	if !tempInPod {
+		return false, Declare(e.NetNS, e.Name, e.UID, e.Peer, e.Declared, false)
+	}
+	// Made now or by a pass that failed before the rename: declared in full, then named and up.
+	if err := Declare(e.NetNS, e.Temp, e.UID, e.Peer, e.Declared, true); err != nil {
 		return created, err
 	}
-	return created, nil
+	return created, podNs.Do(func(_ ns.NetNS) error {
+		l, err := netlink.LinkByName(e.Temp)
+		if err != nil {
+			return fmt.Errorf("interface %s not found inside netns %s: %w", e.Temp, e.NetNS, err)
+		}
+		if err := netlink.LinkSetName(l, e.Name); err != nil {
+			return fmt.Errorf("failed to rename %s -> %s inside %s: %w", e.Temp, e.Name, e.NetNS, err)
+		}
+		if err := netlink.LinkSetUp(l); err != nil {
+			return fmt.Errorf("failed to set %s up inside %s: %w", e.Name, e.NetNS, err)
+		}
+		return nil
+	})
 }
 
 // makePair creates the pod end and its node end on the node and moves the pod end in under its
 // temporary name; the node end stays down until the daemon joins it.
 func makePair(e PodEnd, podNs ns.NetNS) error {
-	mtu := e.MTU
+	mtu := e.Declared.MTU
 	if mtu <= 0 {
 		mtu = 1500
 	}
 	veth := &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: e.Host, MTU: mtu, TxQLen: GetLinkTxQLen()},
+		LinkAttrs: netlink.LinkAttrs{Name: e.Host, MTU: HostEndMTU, TxQLen: GetLinkTxQLen()},
 		PeerName:  e.Temp,
+		PeerMTU:   uint32(mtu),
 	}
 	if err := netlink.LinkAdd(veth); err != nil {
 		return fmt.Errorf("failed to create the pair (%s, %s): %w", e.Host, e.Temp, err)

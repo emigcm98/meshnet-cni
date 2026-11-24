@@ -36,15 +36,34 @@ spec:
                       description: 'Peer interface name'
                       type: string
                     peer_ip:
-                      description: '(Optional) Local IP address'
+                      description: '(Optional) Peer IP address'
                       type: string
                     local_ip:
-                      description: '(Optional) Peer IP address'
+                      description: '(Optional) Local IP address'
                       type: string
                     mtu:
                       description: '(Optional) MTU of the link; both ends get the larger of the two requests'
                       type: integer
                       minimum: 0
+                    addresses:
+                      description: '(Optional) Addresses of the local end beyond local_ip, of either family, in CIDR notation'
+                      items:
+                        type: string
+                      type: array
+                    mac:
+                      description: '(Optional) MAC address of the local end'
+                      type: string
+                      pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'
+                    txqueuelen:
+                      description: '(Optional) Transmit queue length of the local end, LINK_TXQUEUELEN when absent'
+                      type: integer
+                      minimum: 0
+                    offloads:
+                      description: '(Optional) Keep the kernel tx offloads on the local end, switched off when absent'
+                      type: boolean
+                    unplugged:
+                      description: '(Optional) The cable pulled: both ends lose carrier and keep their configuration; either end declaring it unplugs the link'
+                      type: boolean
                   type: object
                 type: array
             type: object
