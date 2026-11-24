@@ -94,20 +94,15 @@ func TestSetLinkMTU(t *testing.T) {
 	}
 }
 
-func TestConfigurePodLinksMTU(t *testing.T) {
+func TestEnsurePodEndMTU(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("Test requires root privileges. Run test with sudo")
 	}
-	ns1, err := testutils.NewNS()
+	podNS, err := testutils.NewNS()
 	if err != nil {
-		t.Fatalf("Failed to create ns1: %v", err)
+		t.Fatalf("Failed to create the netns: %v", err)
 	}
-	defer func() { _ = ns1.Close() }()
-	ns2, err := testutils.NewNS()
-	if err != nil {
-		t.Fatalf("Failed to create ns2: %v", err)
-	}
-	defer func() { _ = ns2.Close() }()
+	defer func() { _ = podNS.Close() }()
 
 	tests := []struct {
 		uid  int64
@@ -115,37 +110,27 @@ func TestConfigurePodLinksMTU(t *testing.T) {
 		want int
 	}{
 		{uid: 1, mtu: 0, want: 1500},
-		{uid: 2, mtu: 9500, want: 9500},
+		{uid: 2, mtu: 1450, want: 1450},
+		{uid: 3, mtu: 9500, want: 9500},
 	}
-	var links1, links2 []wireutil.PodLinkConfig
 	for _, tt := range tests {
-		intf := fmt.Sprintf("eth%d", tt.uid)
-		links1 = append(links1, wireutil.PodLinkConfig{PodName: "p1", PeerPodName: "p2", LinkUID: tt.uid, KubeNs: "mtu", LocalIntf: intf, MTU: tt.mtu})
-		links2 = append(links2, wireutil.PodLinkConfig{PodName: "p2", PeerPodName: "p1", LinkUID: tt.uid, KubeNs: "mtu", LocalIntf: intf, MTU: tt.mtu})
-	}
-	if err := wireutil.ConfigurePodLinks(ns1.Path(), links1); err != nil {
-		t.Fatalf("ConfigurePodLinks(p1) failed: %v", err)
-	}
-	if err := wireutil.ConfigurePodLinks(ns2.Path(), links2); err != nil {
-		t.Fatalf("ConfigurePodLinks(p2) failed: %v", err)
-	}
-
-	// Both ends of each veth pair must have the link's MTU.
-	for _, podNS := range []ns.NetNS{ns1, ns2} {
+		cfg := wireutil.PodLinkConfig{PodName: "p1", PeerPodName: "p2", LinkUID: tt.uid, KubeNs: "mtu", LocalIntf: fmt.Sprintf("eth%d", tt.uid)}
+		end := wireutil.NewPodEnd(podNS.Path(), cfg, tt.mtu)
+		if _, err := wireutil.EnsurePodEnd(end); err != nil {
+			t.Fatalf("EnsurePodEnd(%s) failed: %v", cfg.LocalIntf, err)
+		}
+		defer func() { _ = wireutil.RemoveHostLink(end.Host) }()
 		if err := podNS.Do(func(_ ns.NetNS) error {
-			for _, tt := range tests {
-				intf := fmt.Sprintf("eth%d", tt.uid)
-				l, err := netlink.LinkByName(intf)
-				if err != nil {
-					return err
-				}
-				if got := l.Attrs().MTU; got != tt.want {
-					t.Errorf("MTU of %s in %s = %d, want %d", intf, podNS.Path(), got, tt.want)
-				}
+			l, err := netlink.LinkByName(cfg.LocalIntf)
+			if err != nil {
+				return err
+			}
+			if got := l.Attrs().MTU; got != tt.want {
+				t.Errorf("MTU of %s = %d, want %d", cfg.LocalIntf, got, tt.want)
 			}
 			return nil
 		}); err != nil {
-			t.Fatalf("Failed to inspect %s: %v", podNS.Path(), err)
+			t.Fatalf("Failed to inspect %s: %v", cfg.LocalIntf, err)
 		}
 	}
 }

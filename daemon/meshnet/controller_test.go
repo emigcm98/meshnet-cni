@@ -96,11 +96,11 @@ func TestCleanupPodLinks(t *testing.T) {
 	}
 }
 
-func TestCleanupOrphanedHostVeths(t *testing.T) {
+func TestCleanupOrphanedHostLinks(t *testing.T) {
 	InitLogger()
 	m := &Meshnet{}
-	if err := m.CleanupOrphanedHostVeths(context.Background()); err != nil {
-		t.Fatalf("CleanupOrphanedHostVeths failed: %v", err)
+	if err := m.CleanupOrphanedHostLinks(context.Background()); err != nil {
+		t.Fatalf("CleanupOrphanedHostLinks failed: %v", err)
 	}
 }
 

@@ -19,9 +19,9 @@ lint:
 test:
 	go test ./...
 
-## Run the tests that need network namespaces of their own, as root
+## Run the tests that need network namespaces of their own, as root, with the user's module cache
 test-root:
-	sudo env "PATH=$$PATH" go test -count=1 ./utils/wireutil/... ./daemon/...
+	sudo env "PATH=$$PATH" "GOMODCACHE=$$(go env GOMODCACHE)" go test -count=1 ./utils/wireutil/... ./daemon/...
 
 # Build local binaries
 local-build:
@@ -88,6 +88,11 @@ eviction: wait-for-meshnet
 ## Add and remove a veth and a vxlan on running pods, checking that no pod restarts
 live-links: wait-for-meshnet
 	tests/live-links.sh
+
+.PHONY: off-links
+## Switch pods off and on and shut a port, checking that the neighbour keeps its interfaces and follows the carrier
+off-links: wait-for-meshnet
+	tests/off-links.sh
 
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   

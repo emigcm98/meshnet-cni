@@ -6,6 +6,7 @@ import (
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/safchain/ethtool"
+	"github.com/vishvananda/netlink"
 )
 
 const GRPCDefaultPort = 51111
@@ -79,4 +80,32 @@ func VxlanSource(nodeIP string, nodeIntf string) (string, string, error) {
 		}
 	}
 	return "", "", fmt.Errorf("no iface found for address %s", nodeIP)
+}
+
+// DefaultRouteInterface returns the interface of the node's default route, or "" without one.
+func DefaultRouteInterface() string {
+	routes, err := netlink.RouteGet(net.IPv4(1, 1, 1, 1))
+	if err != nil || len(routes) == 0 {
+		return ""
+	}
+	l, err := netlink.LinkByIndex(routes[0].LinkIndex)
+	if err != nil {
+		return ""
+	}
+	return l.Attrs().Name
+}
+
+// vxlanOverhead is what VXLAN over IPv4 adds to a frame: outer IP, UDP and VXLAN headers and the
+// inner Ethernet header.
+const vxlanOverhead = 50
+
+// VxlanMTU returns the largest MTU a vxlan over the interface parent carries, 1450 when parent is
+// unknown, which is what a 1500-byte network gives.
+func VxlanMTU(parent string) int {
+	if parent != "" {
+		if l, err := netlink.LinkByName(parent); err == nil && l.Attrs().MTU > vxlanOverhead {
+			return l.Attrs().MTU - vxlanOverhead
+		}
+	}
+	return 1500 - vxlanOverhead
 }

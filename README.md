@@ -6,9 +6,9 @@ This is the fork that [KubeNDT](https://github.com/emigcm98/kubendt) runs. It de
 
 ## How it works
 
-The `meshnet` binary is a chained CNI plugin: when a pod with a `Topology` starts, it tells the local `meshnetd` the pod's network namespace and node address, then waits up to 30 s for the pod's interfaces. `meshnetd` runs on every node and watches the `Topology` resources; it reconciles a local pod when the pod or one of its peers changes and once a minute, creating what is missing and replacing what is of the wrong kind, so a pod that moves to another node, or a link deleted by hand, is rewired without a restart. Links added to or removed from a `Topology` are wired or removed on the running pods. Every interface meshnet wires carries `meshnet/<uid>/<peer>` as its alias, and only those are ever deleted, so the workload's own interfaces are safe. The error of the last reconcile, if any, is in the pod's `status.plumbing_error`. An interface the workload shuts down stays down.
+The `meshnet` binary is a chained CNI plugin: when a pod with a `Topology` starts, it tells the local `meshnetd` the pod's network namespace and node address, then waits up to 30 s for the pod's interfaces. `meshnetd` runs on every node and watches the `Topology` resources; it reconciles a local pod when the pod or one of its peers changes and once a minute, creating what is missing and replacing what is of the wrong kind, so a pod that moves to another node, or a link deleted by hand, is rewired without a restart. Each end of a link in a pod is a veth whose other end stays on the node, named `mn<hash>`; the daemon joins the node ends of a link with tc redirects when both pods are on one node, and through a vxlan of the node (`mx<hash>`) when they are not. A pod that goes takes only its own pair: its neighbours keep their interfaces and their configuration, without carrier, until it is back, and their interfaces are the same ones whichever node it comes back on. The carrier a pod sees is set by the daemon on the node end: none while the peer is off, the peer's admin state when both are on one node, up across nodes. Links added to or removed from a `Topology` are wired or removed on the running pods. Every interface meshnet wires carries `meshnet/<uid>/<peer>` as its alias, and only those are ever deleted, so the workload's own interfaces are safe. The error of the last reconcile, if any, is in the pod's `status.plumbing_error`. An interface the workload shuts down stays down.
 
-`LINK_MTU` on the DaemonSet sets the MTU of links that do not ask for one, and `LINK_TXQUEUELEN` the queue length of every link end (10000 by default).
+`LINK_MTU` on the DaemonSet sets the MTU of links that do not ask for one; without it they get the MTU of the node's interface less the 50 bytes of a vxlan, 1450 on a 1500 network, and `LINK_TXQUEUELEN` the queue length of every link end (10000 by default).
 
 ## Topology
 
@@ -48,10 +48,12 @@ Images live at `ghcr.io/emigcm98/meshnet`: every merge to `master` publishes `sh
 make test        # go test ./...
 make test-root   # the tests that make network namespaces, as root
 make docker      # the image, tagged with the commit
-make up          # a local kind cluster of one control plane and three workers
+make up          # a local kind cluster of one control plane and two workers
 make install     # loads the image into it and applies manifests/overlays/e2e
 make e2e         # the three-node topology of tests/3node.yml and pings over its links
 make eviction    # tests/eviction.sh: a pod recreated on its peer's worker and back, a ping per step
+make live-links  # tests/live-links.sh: links added to and removed from running pods
+make off-links   # tests/off-links.sh: neighbours switched off and on, a port shut, the survivor's interfaces kept
 make down
 ```
 
