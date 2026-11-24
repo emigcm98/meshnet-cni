@@ -2,6 +2,7 @@ package wireutil_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/containernetworking/plugins/pkg/ns"
@@ -31,8 +32,19 @@ func TestMacvlanLifecycle(t *testing.T) {
 	}
 	defer podNs.Close()
 
-	if err := wireutil.MakeMacvlan(podNs.Path(), "eth1", parent, "192.0.2.1/24"); err != nil {
-		t.Fatalf("MakeMacvlan: %v", err)
+	created, err := wireutil.MakeMacvlan(podNs.Path(), "eth1", parent)
+	if err != nil || !created {
+		t.Fatalf("MakeMacvlan: created %t, %v", created, err)
+	}
+	kernels := readIface(t, podNs, "eth1")
+	cfg := wireutil.PodLinkConfig{LinkUID: 9, PeerPodName: "localhost", LocalIntf: "eth1", LocalIP: "192.0.2.1/24"}
+	if err := wireutil.Declare(podNs.Path(), "eth1", 9, "localhost", wireutil.NewUplinkDeclared(cfg), true); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	// What an uplink does not declare stays the kernel's.
+	if got := readIface(t, podNs, "eth1"); got.offloads != kernels.offloads || got.txqlen != kernels.txqlen || got.mtu != kernels.mtu {
+		t.Errorf("uplink eth1 = offloads %t, txqueuelen %d, mtu %d; want the kernel's %t, %d, %d",
+			got.offloads, got.txqlen, got.mtu, kernels.offloads, kernels.txqlen, kernels.mtu)
 	}
 	kind, exists, err := wireutil.LinkInfo(podNs.Path(), "eth1")
 	if err != nil || !exists || kind != "macvlan" {
@@ -51,8 +63,8 @@ func TestMacvlanLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inspecting eth1: %v", err)
 	}
-	if err := wireutil.MakeMacvlan(podNs.Path(), "eth1", parent, "192.0.2.1/24"); err != nil {
-		t.Fatalf("second MakeMacvlan must leave the existing one alone: %v", err)
+	if created, err := wireutil.MakeMacvlan(podNs.Path(), "eth1", parent); err != nil || created {
+		t.Fatalf("second MakeMacvlan must leave the existing one alone: created %t, %v", created, err)
 	}
 
 	if err := wireutil.RemoveLink(podNs.Path(), "eth1"); err != nil {
@@ -71,6 +83,13 @@ func TestLinkTag(t *testing.T) {
 	uid, peer, ok := wireutil.ParseLinkTag(tag)
 	if !ok || uid != 4242 || peer != "r2" {
 		t.Fatalf("ParseLinkTag(%q) = %d, %q, %t", tag, uid, peer, ok)
+	}
+	with := wireutil.LinkTagWith(4242, "r2", wireutil.Declared{MTU: 1450}.Digests())
+	if uid, peer, ok := wireutil.ParseLinkTag(with); !ok || uid != 4242 || peer != "r2" {
+		t.Fatalf("ParseLinkTag(%q) = %d, %q, %t", with, uid, peer, ok)
+	}
+	if long := wireutil.LinkTagWith(1, strings.Repeat("p", 240), wireutil.Declared{}.Digests()); long != wireutil.LinkTag(1, strings.Repeat("p", 240)) {
+		t.Errorf("a tag too long for an alias must go without its digests, got %d characters", len(long))
 	}
 	for _, alias := range []string{"", "uplink to the lab", "meshnet/", "meshnet/x/r2", "meshnet/12"} {
 		if _, _, ok := wireutil.ParseLinkTag(alias); ok {

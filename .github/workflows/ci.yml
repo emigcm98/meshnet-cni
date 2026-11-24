@@ -33,3 +33,4 @@ jobs:
       - run: make eviction
       - run: make live-links
       - run: make off-links
+      - run: make declared

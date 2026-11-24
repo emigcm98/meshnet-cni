@@ -94,6 +94,11 @@ live-links: wait-for-meshnet
 off-links: wait-for-meshnet
 	tests/off-links.sh
 
+.PHONY: declared
+## Check the interface as declared: born so, unplugged and plugged back, changed live, the workload's changes kept
+declared: wait-for-meshnet
+	tests/declared.sh
+
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   
 	sleep 5

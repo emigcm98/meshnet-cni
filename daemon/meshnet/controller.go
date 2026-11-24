@@ -124,6 +124,11 @@ func parsePodLinks(topo *unstructured.Unstructured) ([]wireutil.PodLinkConfig, e
 		peerIP, _, _ := unstructured.NestedString(rl, "peer_ip")
 		uid, _, _ := unstructured.NestedInt64(rl, "uid")
 		mtu, _, _ := unstructured.NestedInt64(rl, "mtu")
+		addresses, _, _ := unstructured.NestedStringSlice(rl, "addresses")
+		mac, _, _ := unstructured.NestedString(rl, "mac")
+		txQLen, _, _ := unstructured.NestedInt64(rl, "txqueuelen")
+		offloads, _, _ := unstructured.NestedBool(rl, "offloads")
+		unplugged, _, _ := unstructured.NestedBool(rl, "unplugged")
 
 		links = append(links, wireutil.PodLinkConfig{
 			PodName:     podName,
@@ -135,6 +140,11 @@ func parsePodLinks(topo *unstructured.Unstructured) ([]wireutil.PodLinkConfig, e
 			PeerIntf:    peerIntf,
 			PeerIP:      peerIP,
 			MTU:         int(mtu),
+			Addresses:   addresses,
+			MAC:         mac,
+			TxQLen:      int(txQLen),
+			Offloads:    offloads,
+			Unplugged:   unplugged,
 		})
 	}
 	return links, nil
@@ -201,23 +211,21 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 		return nil
 	}
 
-	// Every link wired in this pass gets its tag at the end, which is what a later prune looks for.
-	tags := make(map[string]string, len(links))
-	defer func() {
-		if err := wireutil.TagLinks(netNS, tags); err != nil {
-			mnetdLogger.Warnf("ReconcilePodLinks: failed to tag the links of pod %s: %v", topo.GetName(), err)
-		}
-	}()
-
+	// Every interface wired here is declared and tagged as it is wired, and the tag is what a later
+	// prune looks for.
 	peerCache := make(map[string]*unstructured.Unstructured)
 	for _, link := range links {
-		// The external uplink: a macvlan on a node interface, with no peer pod to wait for.
+		// The external uplink: a macvlan on a node interface, with no peer pod to wait for and no
+		// node end, so it has no cable to unplug.
 		if link.PeerPodName == localhost {
-			if err := wireutil.MakeMacvlan(netNS, link.LocalIntf, link.PeerIntf, link.LocalIP); err != nil {
-				mnetdLogger.Errorf("ReconcilePodLinks: failed to create macvlan %s@%s for pod %s: %v", link.LocalIntf, link.PeerIntf, topo.GetName(), err)
+			created, err := wireutil.MakeMacvlan(netNS, link.LocalIntf, link.PeerIntf)
+			if err == nil {
+				err = wireutil.Declare(netNS, link.LocalIntf, link.LinkUID, link.PeerPodName, wireutil.NewUplinkDeclared(link), created)
+			}
+			if err != nil {
+				mnetdLogger.Errorf("ReconcilePodLinks: failed to wire macvlan %s@%s for pod %s: %v", link.LocalIntf, link.PeerIntf, topo.GetName(), err)
 				return err
 			}
-			tags[link.LocalIntf] = wireutil.LinkTag(link.LinkUID, link.PeerPodName)
 			continue
 		}
 
@@ -238,7 +246,6 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 			mnetdLogger.Errorf("ReconcilePodLinks: failed to plumb %s of pod %s: %v", link.LocalIntf, topo.GetName(), err)
 			return err
 		}
-		tags[link.LocalIntf] = wireutil.LinkTag(link.LinkUID, link.PeerPodName)
 		if err := m.joinLink(link, srcIP, netNS, end.Host, peerTopo); err != nil {
 			mnetdLogger.Errorf("ReconcilePodLinks: failed to join %s of pod %s to %s: %v", link.LocalIntf, topo.GetName(), link.PeerPodName, err)
 			return err
@@ -247,10 +254,18 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 	return nil
 }
 
+// peerLinkUnplugged says whether the peer's Topology unplugs link uid.
+func peerLinkUnplugged(peerTopo *unstructured.Unstructured, uid int64) bool {
+	l, ok := findPodLink(peerTopo, uid)
+	return ok && l.Unplugged
+}
+
 // joinLink joins the node end of a link to its peer's and sets the carrier the pod sees: none while
-// the peer is off, the peer's admin state when both are on this node, up across nodes.
+// the peer is off or the cable is unplugged, the peer's admin state when both are on this node, up
+// across nodes. An unplugged link stays joined, so plugging it back is setting the node ends up.
 func (m *Meshnet) joinLink(link wireutil.PodLinkConfig, srcIP, netNS, hostEnd string, peerTopo *unstructured.Unstructured) error {
 	vxName := wireutil.HostVxlanName(link.KubeNs, link.PodName, link.LinkUID)
+	unplugged := link.Unplugged || peerLinkUnplugged(peerTopo, link.LinkUID)
 	peerSrcIP, peerNetNS, peerActive := isPodActive(peerTopo)
 	if !peerActive {
 		m.forgetJoin(hostEnd)
@@ -269,7 +284,7 @@ func (m *Meshnet) joinLink(link wireutil.PodLinkConfig, srcIP, netNS, hostEnd st
 		if err := wireutil.JoinHostEnds(hostEnd, peerHost); err != nil {
 			return err
 		}
-		m.rememberJoin(hostEnd, hostJoin{peerHost: peerHost, netNS: netNS, intf: link.LocalIntf, peerNetNS: peerNetNS, peerIntf: link.PeerIntf})
+		m.rememberJoin(hostEnd, hostJoin{peerHost: peerHost, netNS: netNS, intf: link.LocalIntf, peerNetNS: peerNetNS, peerIntf: link.PeerIntf, unplugged: unplugged})
 		m.syncCarrier(hostEnd)
 		return nil
 	}
@@ -281,7 +296,7 @@ func (m *Meshnet) joinLink(link wireutil.PodLinkConfig, srcIP, netNS, hostEnd st
 	if err := wireutil.JoinVxlan(hostEnd, vxName, int(link.LinkUID+vxlanBase), remote, m.nodeIntf); err != nil {
 		return err
 	}
-	return wireutil.SetHostEndUp(hostEnd, true)
+	return wireutil.SetHostEndUp(hostEnd, !unplugged)
 }
 
 // hostJoin is a same-node join as seen from one of its node ends.
@@ -289,6 +304,7 @@ type hostJoin struct {
 	peerHost            string
 	netNS, intf         string
 	peerNetNS, peerIntf string
+	unplugged           bool
 }
 
 // rememberJoin records a same-node join under both of its node ends, for the carrier watcher.
@@ -299,7 +315,7 @@ func (m *Meshnet) rememberJoin(hostEnd string, j hostJoin) {
 		m.joins = make(map[string]hostJoin)
 	}
 	m.joins[hostEnd] = j
-	m.joins[j.peerHost] = hostJoin{peerHost: hostEnd, netNS: j.peerNetNS, intf: j.peerIntf, peerNetNS: j.netNS, peerIntf: j.intf}
+	m.joins[j.peerHost] = hostJoin{peerHost: hostEnd, netNS: j.peerNetNS, intf: j.peerIntf, peerNetNS: j.netNS, peerIntf: j.intf, unplugged: j.unplugged}
 }
 
 // forgetJoin drops the same-node join of a node end, if it has one, from both sides.
@@ -328,8 +344,8 @@ func (m *Meshnet) syncCarrier(hostEnd string) {
 	if !ok {
 		return
 	}
-	mineUp := wireutil.PodEndAdminUp(j.netNS, j.intf)
-	peerUp := wireutil.PodEndAdminUp(j.peerNetNS, j.peerIntf)
+	mineUp := !j.unplugged && wireutil.PodEndAdminUp(j.netNS, j.intf)
+	peerUp := !j.unplugged && wireutil.PodEndAdminUp(j.peerNetNS, j.peerIntf)
 	if err := wireutil.SetHostEndUp(hostEnd, peerUp); err != nil {
 		mnetdLogger.Debugf("syncCarrier: %s: %v", hostEnd, err)
 	}

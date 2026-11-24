@@ -15,26 +15,48 @@ import (
 // removed from the spec can be found and deleted without ever touching the workload's own interfaces.
 const linkTagPrefix = "meshnet/"
 
+// maxAlias is the longest alias the kernel keeps (IFALIASZ less the terminating zero).
+const maxAlias = 255
+
 // LinkTag is the alias of the interface of link uid towards peer.
 func LinkTag(uid int64, peer string) string {
 	return fmt.Sprintf("%s%d/%s", linkTagPrefix, uid, peer)
 }
 
+// LinkTagWith is LinkTag followed by the digests of what was applied of the link's declaration. A
+// tag that would not fit in an alias goes without them, and the interface is adopted again.
+func LinkTagWith(uid int64, peer string, g Digests) string {
+	tag := LinkTag(uid, peer) + "/" + g.String()
+	if len(tag) > maxAlias {
+		return LinkTag(uid, peer)
+	}
+	return tag
+}
+
 // ParseLinkTag reads a LinkTag back; ok is false for any other alias.
 func ParseLinkTag(alias string) (uid int64, peer string, ok bool) {
+	uid, peer, _, _, ok = parseLinkTag(alias)
+	return uid, peer, ok
+}
+
+// parseLinkTag reads a tag with its digests, if it has them.
+func parseLinkTag(alias string) (uid int64, peer string, g Digests, hasDigests, ok bool) {
 	rest, found := strings.CutPrefix(alias, linkTagPrefix)
 	if !found {
-		return 0, "", false
+		return 0, "", nil, false, false
 	}
-	uidStr, peer, found := strings.Cut(rest, "/")
-	if !found {
-		return 0, "", false
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 2 {
+		return 0, "", nil, false, false
 	}
-	uid, err := strconv.ParseInt(uidStr, 10, 64)
+	uid, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		return 0, "", false
+		return 0, "", nil, false, false
 	}
-	return uid, peer, true
+	if len(parts) == 3 {
+		return uid, parts[1], parseDigests(parts[2]), true, true
+	}
+	return uid, parts[1], nil, false, true
 }
 
 // TaggedLink is an interface meshnet wired, as its tag describes it.
@@ -77,31 +99,6 @@ func PruneLinks(nsPath string, keep map[int64]bool) ([]TaggedLink, error) {
 		return nil
 	})
 	return removed, err
-}
-
-// TagLinks writes tags (interface name to tag) on the interfaces of the netns at nsPath that exist
-// and do not carry them yet; a link made before tags existed is adopted this way.
-func TagLinks(nsPath string, tags map[string]string) error {
-	if len(tags) == 0 {
-		return nil
-	}
-	podNs, err := ns.GetNS(nsPath)
-	if err != nil {
-		return fmt.Errorf("could not open netns %s: %w", nsPath, err)
-	}
-	defer podNs.Close()
-	return podNs.Do(func(_ ns.NetNS) error {
-		for name, tag := range tags {
-			l, err := netlink.LinkByName(name)
-			if err != nil || l.Attrs().Alias == tag {
-				continue
-			}
-			if err := netlink.LinkSetAlias(l, tag); err != nil {
-				return fmt.Errorf("failed to tag %s: %w", name, err)
-			}
-		}
-		return nil
-	})
 }
 
 // LinkInfo says whether name exists in the netns at nsPath and what kind of link it is.
@@ -147,20 +144,15 @@ func RemoveLink(nsPath, name string) error {
 }
 
 // MakeMacvlan hangs a macvlan in bridge mode on the node interface parent and moves it into the
-// netns at nsPath as name, with ip when given. A name already there is left as it is.
-func MakeMacvlan(nsPath, name, parent, ip string) error {
+// netns at nsPath as name, up, and returns whether it made it. A name already there is left as it is;
+// the declaration of the link is Declare's.
+func MakeMacvlan(nsPath, name, parent string) (bool, error) {
 	if _, exists, err := LinkInfo(nsPath, name); err != nil || exists {
-		return err
+		return false, err
 	}
 	parentLink, err := netlink.LinkByName(parent)
 	if err != nil {
-		return fmt.Errorf("failed to find the parent interface %s: %w", parent, err)
-	}
-	var addr *netlink.Addr
-	if ip != "" {
-		if addr, err = netlink.ParseAddr(ip); err != nil {
-			return fmt.Errorf("invalid CIDR %q for %s: %w", ip, name, err)
-		}
+		return false, fmt.Errorf("failed to find the parent interface %s: %w", parent, err)
 	}
 
 	// Made under a temporary name on the node, since the final one may already be taken there.
@@ -170,23 +162,23 @@ func MakeMacvlan(nsPath, name, parent, ip string) error {
 		Mode:      netlink.MACVLAN_MODE_BRIDGE,
 	}
 	if err := netlink.LinkAdd(mv); err != nil {
-		return fmt.Errorf("failed to add macvlan on %s: %w", parent, err)
+		return false, fmt.Errorf("failed to add macvlan on %s: %w", parent, err)
 	}
 	link, err := netlink.LinkByName(tmp)
 	if err != nil {
-		return fmt.Errorf("cannot get %s: %w", tmp, err)
+		return false, fmt.Errorf("cannot get %s: %w", tmp, err)
 	}
 	podNs, err := ns.GetNS(nsPath)
 	if err != nil {
 		_ = netlink.LinkDel(link)
-		return fmt.Errorf("could not open netns %s: %w", nsPath, err)
+		return false, fmt.Errorf("could not open netns %s: %w", nsPath, err)
 	}
 	defer podNs.Close()
 	if err := netlink.LinkSetNsFd(link, int(podNs.Fd())); err != nil {
 		_ = netlink.LinkDel(link)
-		return fmt.Errorf("failed to move %s into netns %s: %w", tmp, nsPath, err)
+		return false, fmt.Errorf("failed to move %s into netns %s: %w", tmp, nsPath, err)
 	}
-	return podNs.Do(func(_ ns.NetNS) error {
+	return true, podNs.Do(func(_ ns.NetNS) error {
 		l, err := netlink.LinkByName(tmp)
 		if err != nil {
 			return fmt.Errorf("failed to find %s inside netns %s: %w", tmp, nsPath, err)
@@ -196,11 +188,6 @@ func MakeMacvlan(nsPath, name, parent, ip string) error {
 		}
 		if err := netlink.LinkSetUp(l); err != nil {
 			return fmt.Errorf("failed to set %s up inside %s: %w", name, nsPath, err)
-		}
-		if addr != nil {
-			if err := netlink.AddrAdd(l, addr); err != nil {
-				return fmt.Errorf("failed to add %s to %s inside %s: %w", ip, name, nsPath, err)
-			}
 		}
 		return nil
 	})

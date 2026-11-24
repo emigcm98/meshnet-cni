@@ -46,8 +46,20 @@ type Link struct {
 	PeerIP    string `json:"peer_ip"`
 	PeerPod   string `json:"peer_pod"`
 	UID       int    `json:"uid"`
-	// MTU of the link; both ends get the larger of the two requests, LINK_MTU when neither asks.
+	// MTU of the link; both ends get the larger of the two requests, LINK_MTU when neither asks, and
+	// otherwise what a vxlan over the node's interface carries.
 	MTU int `json:"mtu,omitempty"`
+	// Addresses of the local end beyond LocalIP, of either family, in CIDR notation.
+	Addresses []string `json:"addresses,omitempty"`
+	// MAC of the local end; the kernel's random one when empty.
+	MAC string `json:"mac,omitempty"`
+	// TxQueueLen of the local end; LINK_TXQUEUELEN when zero.
+	TxQueueLen int `json:"txqueuelen,omitempty"`
+	// Offloads keeps the kernel's tx offloads on the local end, which are switched off otherwise.
+	Offloads bool `json:"offloads,omitempty"`
+	// Unplugged pulls the cable: both ends lose carrier and keep their configuration. Either end
+	// declaring it unplugs the link.
+	Unplugged bool `json:"unplugged,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

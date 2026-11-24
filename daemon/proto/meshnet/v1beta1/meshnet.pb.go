@@ -257,74 +257,6 @@ func (x *PodQuery) GetKubeNs() string {
 	return ""
 }
 
-type SkipQuery struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Pod           string                 `protobuf:"bytes,1,opt,name=pod,proto3" json:"pod,omitempty"`
-	Peer          string                 `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"`
-	KubeNs        string                 `protobuf:"bytes,3,opt,name=kube_ns,json=kubeNs,proto3" json:"kube_ns,omitempty"`
-	LinkId        int64                  `protobuf:"varint,4,opt,name=link_id,json=linkId,proto3" json:"link_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SkipQuery) Reset() {
-	*x = SkipQuery{}
-	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SkipQuery) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SkipQuery) ProtoMessage() {}
-
-func (x *SkipQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SkipQuery.ProtoReflect.Descriptor instead.
-func (*SkipQuery) Descriptor() ([]byte, []int) {
-	return file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *SkipQuery) GetPod() string {
-	if x != nil {
-		return x.Pod
-	}
-	return ""
-}
-
-func (x *SkipQuery) GetPeer() string {
-	if x != nil {
-		return x.Peer
-	}
-	return ""
-}
-
-func (x *SkipQuery) GetKubeNs() string {
-	if x != nil {
-		return x.KubeNs
-	}
-	return ""
-}
-
-func (x *SkipQuery) GetLinkId() int64 {
-	if x != nil {
-		return x.LinkId
-	}
-	return 0
-}
-
 type BoolResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Response      bool                   `protobuf:"varint,1,opt,name=response,proto3" json:"response,omitempty"`
@@ -334,7 +266,7 @@ type BoolResponse struct {
 
 func (x *BoolResponse) Reset() {
 	*x = BoolResponse{}
-	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[4]
+	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -346,7 +278,7 @@ func (x *BoolResponse) String() string {
 func (*BoolResponse) ProtoMessage() {}
 
 func (x *BoolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[4]
+	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -359,7 +291,7 @@ func (x *BoolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoolResponse.ProtoReflect.Descriptor instead.
 func (*BoolResponse) Descriptor() ([]byte, []int) {
-	return file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDescGZIP(), []int{4}
+	return file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *BoolResponse) GetResponse() bool {
@@ -367,98 +299,6 @@ func (x *BoolResponse) GetResponse() bool {
 		return x.Response
 	}
 	return false
-}
-
-type RemotePod struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NetNs         string                 `protobuf:"bytes,1,opt,name=net_ns,json=netNs,proto3" json:"net_ns,omitempty"`
-	IntfName      string                 `protobuf:"bytes,2,opt,name=intf_name,json=intfName,proto3" json:"intf_name,omitempty"`
-	IntfIp        string                 `protobuf:"bytes,3,opt,name=intf_ip,json=intfIp,proto3" json:"intf_ip,omitempty"`
-	PeerVtep      string                 `protobuf:"bytes,4,opt,name=peer_vtep,json=peerVtep,proto3" json:"peer_vtep,omitempty"`
-	KubeNs        string                 `protobuf:"bytes,5,opt,name=kube_ns,json=kubeNs,proto3" json:"kube_ns,omitempty"`
-	Vni           int64                  `protobuf:"varint,6,opt,name=vni,proto3" json:"vni,omitempty"`
-	NodeIntf      string                 `protobuf:"bytes,7,opt,name=node_intf,json=nodeIntf,proto3" json:"node_intf,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RemotePod) Reset() {
-	*x = RemotePod{}
-	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RemotePod) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RemotePod) ProtoMessage() {}
-
-func (x *RemotePod) ProtoReflect() protoreflect.Message {
-	mi := &file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RemotePod.ProtoReflect.Descriptor instead.
-func (*RemotePod) Descriptor() ([]byte, []int) {
-	return file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *RemotePod) GetNetNs() string {
-	if x != nil {
-		return x.NetNs
-	}
-	return ""
-}
-
-func (x *RemotePod) GetIntfName() string {
-	if x != nil {
-		return x.IntfName
-	}
-	return ""
-}
-
-func (x *RemotePod) GetIntfIp() string {
-	if x != nil {
-		return x.IntfIp
-	}
-	return ""
-}
-
-func (x *RemotePod) GetPeerVtep() string {
-	if x != nil {
-		return x.PeerVtep
-	}
-	return ""
-}
-
-func (x *RemotePod) GetKubeNs() string {
-	if x != nil {
-		return x.KubeNs
-	}
-	return ""
-}
-
-func (x *RemotePod) GetVni() int64 {
-	if x != nil {
-		return x.Vni
-	}
-	return 0
-}
-
-func (x *RemotePod) GetNodeIntf() string {
-	if x != nil {
-		return x.NodeIntf
-	}
-	return ""
 }
 
 var File_daemon_proto_meshnet_v1beta1_meshnet_proto protoreflect.FileDescriptor
@@ -485,30 +325,12 @@ const file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDesc = "" +
 	"\x03uid\x18\x06 \x01(\x03R\x03uid\"7\n" +
 	"\bPodQuery\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x17\n" +
-	"\akube_ns\x18\x02 \x01(\tR\x06kubeNs\"c\n" +
-	"\tSkipQuery\x12\x10\n" +
-	"\x03pod\x18\x01 \x01(\tR\x03pod\x12\x12\n" +
-	"\x04peer\x18\x02 \x01(\tR\x04peer\x12\x17\n" +
-	"\akube_ns\x18\x03 \x01(\tR\x06kubeNs\x12\x17\n" +
-	"\alink_id\x18\x04 \x01(\x03R\x06linkId\"*\n" +
+	"\akube_ns\x18\x02 \x01(\tR\x06kubeNs\"*\n" +
 	"\fBoolResponse\x12\x1a\n" +
-	"\bresponse\x18\x01 \x01(\bR\bresponse\"\xbd\x01\n" +
-	"\tRemotePod\x12\x15\n" +
-	"\x06net_ns\x18\x01 \x01(\tR\x05netNs\x12\x1b\n" +
-	"\tintf_name\x18\x02 \x01(\tR\bintfName\x12\x17\n" +
-	"\aintf_ip\x18\x03 \x01(\tR\x06intfIp\x12\x1b\n" +
-	"\tpeer_vtep\x18\x04 \x01(\tR\bpeerVtep\x12\x17\n" +
-	"\akube_ns\x18\x05 \x01(\tR\x06kubeNs\x12\x10\n" +
-	"\x03vni\x18\x06 \x01(\x03R\x03vni\x12\x1b\n" +
-	"\tnode_intf\x18\a \x01(\tR\bnodeIntf2\xd5\x02\n" +
+	"\bresponse\x18\x01 \x01(\bR\bresponse2\x80\x01\n" +
 	"\x05Local\x126\n" +
 	"\x03Get\x12\x19.meshnet.v1beta1.PodQuery\x1a\x14.meshnet.v1beta1.Pod\x12?\n" +
-	"\bSetAlive\x12\x14.meshnet.v1beta1.Pod\x1a\x1d.meshnet.v1beta1.BoolResponse\x12H\n" +
-	"\vSkipReverse\x12\x1a.meshnet.v1beta1.SkipQuery\x1a\x1d.meshnet.v1beta1.BoolResponse\x12A\n" +
-	"\x04Skip\x12\x1a.meshnet.v1beta1.SkipQuery\x1a\x1d.meshnet.v1beta1.BoolResponse\x12F\n" +
-	"\tIsSkipped\x12\x1a.meshnet.v1beta1.SkipQuery\x1a\x1d.meshnet.v1beta1.BoolResponse2M\n" +
-	"\x06Remote\x12C\n" +
-	"\x06Update\x12\x1a.meshnet.v1beta1.RemotePod\x1a\x1d.meshnet.v1beta1.BoolResponseB>Z<github.com/emigcm98/meshnet-cni/daemon/proto/meshnet/v1beta1b\x06proto3"
+	"\bSetAlive\x12\x14.meshnet.v1beta1.Pod\x1a\x1d.meshnet.v1beta1.BoolResponseB>Z<github.com/emigcm98/meshnet-cni/daemon/proto/meshnet/v1beta1b\x06proto3"
 
 var (
 	file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDescOnce sync.Once
@@ -522,31 +344,21 @@ func file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDescGZIP() []byte {
 	return file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDescData
 }
 
-var file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_daemon_proto_meshnet_v1beta1_meshnet_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_daemon_proto_meshnet_v1beta1_meshnet_proto_goTypes = []any{
 	(*Pod)(nil),          // 0: meshnet.v1beta1.Pod
 	(*Link)(nil),         // 1: meshnet.v1beta1.Link
 	(*PodQuery)(nil),     // 2: meshnet.v1beta1.PodQuery
-	(*SkipQuery)(nil),    // 3: meshnet.v1beta1.SkipQuery
-	(*BoolResponse)(nil), // 4: meshnet.v1beta1.BoolResponse
-	(*RemotePod)(nil),    // 5: meshnet.v1beta1.RemotePod
+	(*BoolResponse)(nil), // 3: meshnet.v1beta1.BoolResponse
 }
 var file_daemon_proto_meshnet_v1beta1_meshnet_proto_depIdxs = []int32{
 	1, // 0: meshnet.v1beta1.Pod.links:type_name -> meshnet.v1beta1.Link
 	2, // 1: meshnet.v1beta1.Local.Get:input_type -> meshnet.v1beta1.PodQuery
 	0, // 2: meshnet.v1beta1.Local.SetAlive:input_type -> meshnet.v1beta1.Pod
-	3, // 3: meshnet.v1beta1.Local.SkipReverse:input_type -> meshnet.v1beta1.SkipQuery
-	3, // 4: meshnet.v1beta1.Local.Skip:input_type -> meshnet.v1beta1.SkipQuery
-	3, // 5: meshnet.v1beta1.Local.IsSkipped:input_type -> meshnet.v1beta1.SkipQuery
-	5, // 6: meshnet.v1beta1.Remote.Update:input_type -> meshnet.v1beta1.RemotePod
-	0, // 7: meshnet.v1beta1.Local.Get:output_type -> meshnet.v1beta1.Pod
-	4, // 8: meshnet.v1beta1.Local.SetAlive:output_type -> meshnet.v1beta1.BoolResponse
-	4, // 9: meshnet.v1beta1.Local.SkipReverse:output_type -> meshnet.v1beta1.BoolResponse
-	4, // 10: meshnet.v1beta1.Local.Skip:output_type -> meshnet.v1beta1.BoolResponse
-	4, // 11: meshnet.v1beta1.Local.IsSkipped:output_type -> meshnet.v1beta1.BoolResponse
-	4, // 12: meshnet.v1beta1.Remote.Update:output_type -> meshnet.v1beta1.BoolResponse
-	7, // [7:13] is the sub-list for method output_type
-	1, // [1:7] is the sub-list for method input_type
+	0, // 3: meshnet.v1beta1.Local.Get:output_type -> meshnet.v1beta1.Pod
+	3, // 4: meshnet.v1beta1.Local.SetAlive:output_type -> meshnet.v1beta1.BoolResponse
+	3, // [3:5] is the sub-list for method output_type
+	1, // [1:3] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -563,9 +375,9 @@ func file_daemon_proto_meshnet_v1beta1_meshnet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDesc), len(file_daemon_proto_meshnet_v1beta1_meshnet_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   4,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   1,
 		},
 		GoTypes:           file_daemon_proto_meshnet_v1beta1_meshnet_proto_goTypes,
 		DependencyIndexes: file_daemon_proto_meshnet_v1beta1_meshnet_proto_depIdxs,

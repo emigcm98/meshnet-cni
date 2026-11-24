@@ -6,9 +6,9 @@ This is the fork that [KubeNDT](https://github.com/emigcm98/kubendt) runs. It de
 
 ## How it works
 
-The `meshnet` binary is a chained CNI plugin: when a pod with a `Topology` starts, it tells the local `meshnetd` the pod's network namespace and node address, then waits up to 30 s for the pod's interfaces. `meshnetd` runs on every node and watches the `Topology` resources; it reconciles a local pod when the pod or one of its peers changes and once a minute, creating what is missing and replacing what is of the wrong kind, so a pod that moves to another node, or a link deleted by hand, is rewired without a restart. Each end of a link in a pod is a veth whose other end stays on the node, named `mn<hash>`; the daemon joins the node ends of a link with tc redirects when both pods are on one node, and through a vxlan of the node (`mx<hash>`) when they are not. A pod that goes takes only its own pair: its neighbours keep their interfaces and their configuration, without carrier, until it is back, and their interfaces are the same ones whichever node it comes back on. The carrier a pod sees is set by the daemon on the node end: none while the peer is off, the peer's admin state when both are on one node, up across nodes. Links added to or removed from a `Topology` are wired or removed on the running pods. Every interface meshnet wires carries `meshnet/<uid>/<peer>` as its alias, and only those are ever deleted, so the workload's own interfaces are safe. The error of the last reconcile, if any, is in the pod's `status.plumbing_error`. An interface the workload shuts down stays down.
+The `meshnet` binary is a chained CNI plugin: when a pod with a `Topology` starts, it tells the local `meshnetd` the pod's network namespace and node address, then waits up to 30 s for the pod's interfaces. `meshnetd` runs on every node and watches the `Topology` resources; it reconciles a local pod when the pod or one of its peers changes and once a minute, creating what is missing and replacing what is of the wrong kind, so a pod that moves to another node, or a link deleted by hand, is rewired without a restart. Each end of a link in a pod is a veth whose other end stays on the node, named `mn<hash>`; the daemon joins the node ends of a link with tc redirects when both pods are on one node, and through a vxlan of the node (`mx<hash>`) when they are not. A pod that goes takes only its own pair: its neighbours keep their interfaces and their configuration, without carrier, until it is back, and their interfaces are the same ones whichever node it comes back on. The carrier a pod sees is set by the daemon on the node end: none while the peer is off or the link is unplugged, the peer's admin state when both are on one node, up across nodes. Node ends are at the largest MTU a veth takes, so the pod ends alone decide the MTU of a link, as with a direct veth. Links added to or removed from a `Topology` are wired or removed on the running pods. What a link declares of an interface (addresses, MAC, MTU, queue length, offloads) is applied when the interface is made and whenever that declaration changes; in between the interface is the workload's, so an address, an MTU or a shut port set by hand inside the pod stays until the `Topology` changes that same property or the pod is recreated. Every interface meshnet wires carries `meshnet/<uid>/<peer>/<digests>` as its alias, the digests being those of the declaration it last applied, and only tagged interfaces are ever deleted, so the workload's own interfaces are safe; likewise the addresses meshnet puts carry their own address protocol (`0x6d`, kernel 5.18 or later; on an older kernel an address dropped from a declaration stays), and only those are ever removed. The error of the last reconcile, if any, is in the pod's `status.plumbing_error`.
 
-`LINK_MTU` on the DaemonSet sets the MTU of links that do not ask for one; without it they get the MTU of the node's interface less the 50 bytes of a vxlan, 1450 on a 1500 network, and `LINK_TXQUEUELEN` the queue length of every link end (10000 by default).
+`LINK_MTU` on the DaemonSet sets the MTU of links that do not ask for one; without it they get the MTU of the node's interface less the 50 bytes of a vxlan, 1450 on a 1500 network, and `LINK_TXQUEUELEN` the queue length of link ends that do not ask for one (10000 by default).
 
 ## Topology
 
@@ -27,9 +27,12 @@ spec:
     local_ip: 12.12.12.1/24
     peer_intf: eth1
     peer_ip: 12.12.12.2/24
+    addresses: ["2001:db8:12::1/64"]
+    mac: "02:00:00:00:12:01"
+    mtu: 1400
 ```
 
-A link whose `peer_pod` is `localhost` is a macvlan on the node interface named by `peer_intf`. An optional `mtu` sets the MTU of a link; both ends get the larger of the two requests. The `uid` must be unique on a node across namespaces, since the kernel refuses a second VXLAN with a VNI already in use. `tests/` holds topologies for two, three and five nodes, one with several links between the same pair, and the macvlan case.
+A link whose `peer_pod` is `localhost` is a macvlan on the node interface named by `peer_intf`. The `uid` must be unique on a node across namespaces, since the kernel refuses a second VXLAN with a VNI already in use. The rest is optional and describes the local end, from the pod's own `Topology`: `addresses`, a list of either family beyond `local_ip`; `mac`; `mtu`, where both ends get the larger of the two requests; `txqueuelen`; `offloads: true` to keep the kernel's transmit offloads, switched off otherwise; and `unplugged: true`, the cable pulled, which either end can declare: both pods keep their interfaces administratively up, with their configuration, and lose carrier until it is plugged back, on one node as across nodes. An uplink has no cable to unplug. `tests/` holds topologies for two, three and five nodes, one with several links between the same pair, and the macvlan case.
 
 ## Install
 
@@ -54,6 +57,7 @@ make e2e         # the three-node topology of tests/3node.yml and pings over its
 make eviction    # tests/eviction.sh: a pod recreated on its peer's worker and back, a ping per step
 make live-links  # tests/live-links.sh: links added to and removed from running pods
 make off-links   # tests/off-links.sh: neighbours switched off and on, a port shut, the survivor's interfaces kept
+make declared    # tests/declared.sh: the interface as declared, a cable unplugged, live changes, the workload's kept
 make down
 ```
 
