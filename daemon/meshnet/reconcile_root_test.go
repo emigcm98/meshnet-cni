@@ -16,7 +16,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	fakeTopology "github.com/emigcm98/meshnet-cni/api/clientset/v1beta1/fake"
+	"github.com/emigcm98/meshnet-cni/api/types/v1beta1"
 	"github.com/emigcm98/meshnet-cni/utils/wireutil"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 )
 
 func topologyWithLinks(name, srcIP, netNS string, links ...map[string]interface{}) *unstructured.Unstructured {
@@ -178,6 +181,7 @@ func newTestMeshnet(t *testing.T, topos ...*unstructured.Unstructured) *Meshnet 
 func (m *Meshnet) mustReconcile(t *testing.T, topos ...*unstructured.Unstructured) {
 	t.Helper()
 	for _, topo := range topos {
+		m.putAPI(t, topo)
 		m.topoCache.Put(topo)
 	}
 	for _, topo := range topos {
@@ -635,5 +639,143 @@ func TestReconcileShaping(t *testing.T) {
 	}
 	if !carrier(nsA, "eth1") || !carrier(nsA, "eth2") {
 		t.Errorf("an invalid shaping kept the links of a from being wired")
+	}
+}
+
+// Each link's status says how it is wired and how it stands, a link that fails is reported without
+// keeping the others from being wired, the changes are events, and the node end counts the traffic.
+func TestReconcileLinkStatus(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	InitLogger()
+	dummy(t, "vteptest3")
+	dummy(t, "uplinktest3")
+	if l, err := netlink.LinkByName("uplinktest3"); err == nil {
+		_ = netlink.LinkSetUp(l)
+	}
+	nsA, nsB := newNS(t), newNS(t)
+	defer nsA.Close()
+	l := func(uid int64, peer, local, peerIntf, ip string) map[string]interface{} {
+		return map[string]interface{}{"uid": uid, "peer_pod": peer, "local_intf": local, "peer_intf": peerIntf, "local_ip": ip}
+	}
+	linkB := l(31, "a", "eth1", "eth1", "10.31.0.2/30")
+	a := topologyWithLinks("a", "10.0.0.1", nsA.Path(),
+		l(31, "b", "eth1", "eth1", "10.31.0.1/30"),
+		l(32, "c", "eth2", "eth1", "10.32.0.1/30"),
+		l(33, "localhost", "eth9", "uplinktest3", ""),
+		l(34, "b", "eth3", "eth3", "not an address"))
+	b := topologyWithLinks("b", "10.0.0.1", nsB.Path(), linkB, l(34, "a", "eth3", "eth3", ""))
+	c := topologyWithLinks("c", "10.0.0.2", "/var/run/netns/elsewhere", l(32, "a", "eth1", "eth2", "10.32.0.3/30"))
+	m := newTestMeshnet(t, a, b, c)
+	m.nodeIntf, m.nodeName = "vteptest3", "w1"
+	rec := record.NewFakeRecorder(50)
+	m.recorder = rec
+	m.topoCache.Put(b)
+	if err := m.ReconcilePodLinks(context.Background(), b); err != nil {
+		t.Fatalf("reconciling b: %v", err)
+	}
+	err := m.ReconcilePodLinks(context.Background(), a)
+	if err == nil || !strings.Contains(err.Error(), "eth3") {
+		t.Fatalf("a's pass returned %v, want the error of eth3", err)
+	}
+	statusOf := func(name string) map[int]v1beta1.LinkStatus {
+		u, err := m.tClient.Topology("default").Unstructured(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		out := map[int]v1beta1.LinkStatus{}
+		for _, s := range linksOf(u) {
+			out[s.UID] = s
+		}
+		return out
+	}
+	st := statusOf("a")
+	if s := st[31]; s.State != v1beta1.LinkUp || s.Transport != "veth" || s.Node != "w1" || s.IfIndex == 0 || s.MAC == "" || s.MTU != 1450 {
+		t.Errorf("link 31, to b on this node: %+v", s)
+	}
+	if s := st[32]; s.State != v1beta1.LinkUp || s.Transport != "vxlan" || s.VNI != 32+vxlanBase {
+		t.Errorf("link 32, to c across nodes: %+v", s)
+	}
+	if s := st[33]; s.State != v1beta1.LinkUp || s.Transport != "macvlan" {
+		t.Errorf("link 33, the uplink: %+v", s)
+	}
+	if s := st[34]; s.State != v1beta1.LinkFailed || !strings.Contains(s.Error, "invalid CIDR") {
+		t.Errorf("link 34, with a bad address: %+v", s)
+	}
+	// It leaves nothing half made: no temporary end in the pod, no node end.
+	if wireutil.HostLinkExists(wireutil.HostEndName("default", "a", 34)) {
+		t.Errorf("the failed link 34 left its node end")
+	}
+	_ = nsA.Do(func(_ ns.NetNS) error {
+		list, _ := netlink.LinkList()
+		for _, l := range list {
+			if strings.HasPrefix(l.Attrs().Name, "mp") {
+				t.Errorf("the failed link 34 left %s in the pod", l.Attrs().Name)
+			}
+		}
+		return nil
+	})
+
+	// b goes: a's link to it is off, an event says so, and a's other links do not move.
+	removeNS(t, nsB, wireutil.HostEndName("default", "b", 31), wireutil.HostEndName("default", "b", 34))
+	m.mustReconcileStatus(t, topologyWithLinks("b", "", "", linkB), a)
+	if s := statusOf("a")[31]; s.State != v1beta1.LinkOff || s.Transport != "" {
+		t.Errorf("link 31 with b off: %+v", s)
+	}
+	var events []string
+	for len(rec.Events) > 0 {
+		events = append(events, <-rec.Events)
+	}
+	joined := strings.Join(events, "\n")
+	for _, want := range []string{"Normal Wired eth1 to b wired, over veth, up", "Normal Wired eth2 to c wired, over vxlan, VNI 5032, up", "Warning WiringFailed eth3 to b", "Normal LinkDown eth1 to b down: the peer is off"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("events lack %q:\n%s", want, joined)
+		}
+	}
+
+	// The node end of a link counts what its pod sends.
+	before, _ := readNodeEnd(wireutil.HostEndName("default", "a", 32))
+	_ = nsA.Do(func(_ ns.NetNS) error {
+		c, err := net.Dial("udp4", "10.32.0.3:9")
+		if err == nil {
+			_, _ = c.Write(make([]byte, 1000))
+			c.Close()
+		}
+		return nil
+	})
+	if after, ok := readNodeEnd(wireutil.HostEndName("default", "a", 32)); !ok || after.txBytes < before.txBytes+1000 {
+		t.Errorf("the node end of link 32 counted %d bytes sent, from %d, after a 1000-byte datagram", after.txBytes, before.txBytes)
+	}
+}
+
+// mustReconcileStatus is mustReconcile for passes that write status and may report a link's error.
+func (m *Meshnet) mustReconcileStatus(t *testing.T, topos ...*unstructured.Unstructured) {
+	t.Helper()
+	for _, topo := range topos {
+		m.putAPI(t, topo)
+		m.topoCache.Put(topo)
+	}
+	for _, topo := range topos {
+		_ = m.ReconcilePodLinks(context.Background(), topo)
+	}
+}
+
+// putAPI makes the fake API hold topo as the test means it, as the plugin and the backend would have
+// written it, since a status write puts the API's copy back in the cache. Its links' status stays.
+func (m *Meshnet) putAPI(t *testing.T, topo *unstructured.Unstructured) {
+	t.Helper()
+	ctx := context.Background()
+	cur, err := m.tClient.Topology(topo.GetNamespace()).Unstructured(ctx, topo.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading %s from the fake API: %v", topo.GetName(), err)
+	}
+	next := topo.DeepCopy()
+	next.SetResourceVersion(cur.GetResourceVersion())
+	if links, found, _ := unstructured.NestedSlice(cur.Object, "status", "links"); found {
+		_ = unstructured.SetNestedSlice(next.Object, links, "status", "links")
+	}
+	if _, err := m.tClient.Topology(topo.GetNamespace()).Update(ctx, next, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("writing %s to the fake API: %v", topo.GetName(), err)
 	}
 }

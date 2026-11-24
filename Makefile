@@ -104,6 +104,11 @@ declared: wait-for-meshnet
 shaping: wait-for-meshnet
 	tests/shaping.sh
 
+.PHONY: status
+## Check each link's status, its events and the daemon's metrics
+status: wait-for-meshnet
+	tests/status.sh
+
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   
 	sleep 5

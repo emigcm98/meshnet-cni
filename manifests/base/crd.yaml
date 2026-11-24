@@ -154,10 +154,56 @@ spec:
               plumbing_error:
                 description: 'The error of the last reconcile of the pod links, empty when they are wired'
                 type: string
+              links:
+                description: 'The state of each of the pod links as the daemon of its node last saw it'
+                items:
+                  properties:
+                    uid:
+                      type: integer
+                    local_intf:
+                      type: string
+                    peer_pod:
+                      type: string
+                    state:
+                      description: 'up, down (a port shut), off (the peer not running), unplugged or failed'
+                      type: string
+                    transport:
+                      description: 'veth (one node), vxlan (across nodes) or macvlan (an uplink); empty while the peer is off'
+                      type: string
+                    node:
+                      description: 'The node of this end'
+                      type: string
+                    ifindex:
+                      type: integer
+                    mac:
+                      type: string
+                    mtu:
+                      type: integer
+                    vni:
+                      type: integer
+                    error:
+                      description: 'Why the link could not be wired or shaped'
+                      type: string
+                  type: object
+                type: array
             type: object
         type: object
     served: true
     storage: true
+    additionalPrinterColumns:
+      - name: Node IP
+        type: string
+        jsonPath: .status.src_ip
+      - name: Links
+        type: string
+        jsonPath: .status.links[*].state
+      - name: Error
+        type: string
+        jsonPath: .status.plumbing_error
+        priority: 1
+      - name: Age
+        type: date
+        jsonPath: .metadata.creationTimestamp
     subresources:
       status: {}
 status:

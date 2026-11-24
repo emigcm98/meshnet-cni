@@ -35,3 +35,4 @@ jobs:
       - run: make off-links
       - run: make declared
       - run: make shaping
+      - run: make status

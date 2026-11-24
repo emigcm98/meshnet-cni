@@ -365,7 +365,7 @@ func TestTopologyCache_DeepCopyIsolation(t *testing.T) {
 	}
 }
 
-func TestUpdatePlumbingErrorStatus_NoOpWhenUnchanged(t *testing.T) {
+func TestUpdateReconcileStatus_NoOpWhenUnchanged(t *testing.T) {
 	InitLogger()
 	p1 := createFakePodTopology("p1", "default", "10.0.0.1", "/proc/1/ns/net", []string{"p2"})
 	fakeClient, err := fakeTopology.NewSimpleClientset(p1)
@@ -380,17 +380,17 @@ func TestUpdatePlumbingErrorStatus_NoOpWhenUnchanged(t *testing.T) {
 	m.topoCache.Put(p1)
 
 	// 1. Clearing when already empty should succeed without error
-	if err := m.updatePlumbingErrorStatus(context.Background(), p1, ""); err != nil {
+	if err := m.updateReconcileStatus(context.Background(), p1, "", podReconcile{}); err != nil {
 		t.Fatalf("expected nil error on clearing empty error: %v", err)
 	}
 
 	// 2. Setting an error
-	if err := m.updatePlumbingErrorStatus(context.Background(), p1, "dial timeout"); err != nil {
+	if err := m.updateReconcileStatus(context.Background(), p1, "dial timeout", podReconcile{}); err != nil {
 		t.Fatalf("expected nil error on setting error: %v", err)
 	}
 
 	// 3. Setting the exact same error again should be a no-op
-	if err := m.updatePlumbingErrorStatus(context.Background(), p1, "dial timeout"); err != nil {
+	if err := m.updateReconcileStatus(context.Background(), p1, "dial timeout", podReconcile{}); err != nil {
 		t.Fatalf("expected nil error on setting duplicate error: %v", err)
 	}
 }
