@@ -12,7 +12,7 @@ The `meshnet` binary is a chained CNI plugin: when a pod with a `Topology` start
 
 ## Topology
 
-One `Topology` per pod, in the pod's namespace, listing its links. The `uid` identifies the link on both ends and is the VXLAN VNI when the link crosses nodes; the addresses are optional.
+One `Topology` per pod, in the pod's namespace, listing its links. A link appears in both pods' Topologies with the same `uid`, which is the VXLAN VNI when the link crosses nodes. Each Topology describes its own pod's end: what has no `peer_` in its name is that end's, so r1's `eth1` below gets `12.12.12.1/24`, `2001:db8:12::1/64` and its MAC from r1's Topology, and r2's `eth1` gets its own from r2's; `peer_ip` is informative and meshnet puts it nowhere.
 
 ```yaml
 apiVersion: networkop.co.uk/v1beta1
@@ -30,9 +30,32 @@ spec:
     addresses: ["2001:db8:12::1/64"]
     mac: "02:00:00:00:12:01"
     mtu: 1400
+---
+apiVersion: networkop.co.uk/v1beta1
+kind: Topology
+metadata:
+  name: r2
+spec:
+  links:
+  - uid: 1
+    peer_pod: r1
+    local_intf: eth1
+    local_ip: 12.12.12.2/24
+    peer_intf: eth1
+    peer_ip: 12.12.12.1/24
+    addresses: ["2001:db8:12::2/64"]
+    mac: "02:00:00:00:12:02"
 ```
 
 A link whose `peer_pod` is `localhost` is a macvlan on the node interface named by `peer_intf`. The `uid` must be unique on a node across namespaces, since the kernel refuses a second VXLAN with a VNI already in use. The rest is optional and describes the local end, from the pod's own `Topology`: `addresses`, a list of either family beyond `local_ip`; `mac`; `mtu`, where both ends get the larger of the two requests; `txqueuelen`; `offloads: true` to keep the kernel's transmit offloads, switched off otherwise; and `unplugged: true`, the cable pulled, which either end can declare: both pods keep their interfaces administratively up, with their configuration, and lose carrier until it is plugged back, on one node as across nodes. An uplink has no cable to unplug. `shaping` is a netem or a tbf for the traffic the local end sends, with tc's units, as in `shaping: {delay: 20ms, jitter: 2ms, loss: 0.5%, rate: 10mbit}` or `shaping: {qdisc: tbf, rate: 10mbit, burst: 32kbit, latency: 50ms}`; the netem fields are `delay`, `jitter`, `delay_correlation`, `loss`, `loss_correlation`, `duplicate`, `corrupt`, `reorder`, `reorder_correlation`, `limit` and `rate`. It is put on the node end of the other side, so it shapes the link in that direction alone, on one node as across nodes, out of the workload's sight and apart from its own qdiscs; the daemon keeps it there, changes it in place when the declaration changes, and puts it back on a recreated pod's new node end. An uplink's shaping goes on the interface in the pod, as part of its declaration. An invalid shaping is reported in `status.plumbing_error` and leaves the last valid one in place, without keeping the link from being wired. `tests/` holds topologies for two, three and five nodes, one with several links between the same pair, and the macvlan case.
+
+## Status, events and metrics
+
+The daemon of a pod's node writes the state of each of its links in `status.links` of its Topology, only when it changes: `state` (`up`; `down`, a port shut on either end; `off`, the peer not running; `unplugged`; `failed`), `transport` (`veth` on one node, `vxlan` across nodes, `macvlan` for an uplink), `node`, `ifindex`, `mac`, `mtu`, `vni` and `error`. A link that fails is `failed` with its error, and the pod's other links are wired all the same; `status.plumbing_error` gathers the errors of the last pass. `kubectl get topology` shows each pod's node address and the states of its links. The status goes with the pod.
+
+Each change of a link is an event on its Topology: `Wired` (a link made, made again or moved to another transport), `Unwired`, `LinkUp`, `LinkDown` with its cause, and the warning `WiringFailed`, so `kubectl get events --field-selector involvedObject.kind=Topology` is the history of a lab's links.
+
+`meshnetd` serves Prometheus metrics on port 51112 of each node, `/metrics` (`METRICS_PORT` on the DaemonSet moves it, 0 turns it off): `meshnet_link_info` with the state, transport and node of each link end, `meshnet_link_up`, and from the node ends the bytes, packets and drops each pod received and sent on each link, and the packets the link's shaping dropped (`meshnet_link_*_total`), labelled by namespace, pod, interface, peer and uid. An uplink, which has no node end, has its state alone.
 
 ## Install
 
@@ -59,6 +82,7 @@ make live-links  # tests/live-links.sh: links added to and removed from running 
 make off-links   # tests/off-links.sh: neighbours switched off and on, a port shut, the survivor's interfaces kept
 make declared    # tests/declared.sh: the interface as declared, a cable unplugged, live changes, the workload's kept
 make shaping     # tests/shaping.sh: delay, loss and rate per direction, on one node and across nodes, changed live
+make status      # tests/status.sh: each link's state in its Topology, its events and the metrics
 make down
 ```
 

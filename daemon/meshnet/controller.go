@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	topologyclientv1 "github.com/emigcm98/meshnet-cni/api/clientset/v1beta1"
+	"github.com/emigcm98/meshnet-cni/api/types/v1beta1"
 	"github.com/emigcm98/meshnet-cni/utils/wireutil"
 )
 
@@ -60,6 +61,7 @@ func (m *Meshnet) clearPodAliveStatus(ctx context.Context, topo *unstructured.Un
 		unstructured.RemoveNestedField(latestTopo.Object, "status", "net_ns")
 		unstructured.RemoveNestedField(latestTopo.Object, "status", "container_id")
 		unstructured.RemoveNestedField(latestTopo.Object, "status", "plumbing_error")
+		unstructured.RemoveNestedField(latestTopo.Object, "status", "links")
 
 		_, err = m.tClient.Topology(latestTopo.GetNamespace()).Update(ctx, latestTopo, metav1.UpdateOptions{})
 		if err == nil && m.topoCache != nil {
@@ -177,23 +179,29 @@ func (m *Meshnet) ReconcilePodLinks(ctx context.Context, topo *unstructured.Unst
 	if topo == nil {
 		return nil
 	}
-	err := m.reconcilePodLinksInternal(ctx, topo)
+	res, err := m.reconcilePodLinksInternal(ctx, topo)
+	errMsg := ""
 	if err != nil {
-		if statusErr := m.updatePlumbingErrorStatus(ctx, topo, err.Error()); statusErr != nil {
-			mnetdLogger.Warnf("ReconcilePodLinks: failed to update plumbing error status: %v", statusErr)
-		}
-		return err
+		errMsg = err.Error()
 	}
-	if err := m.updatePlumbingErrorStatus(ctx, topo, ""); err != nil {
-		mnetdLogger.Warnf("ReconcilePodLinks: failed to clear plumbing error status: %v", err)
+	if statusErr := m.updateReconcileStatus(ctx, topo, errMsg, res); statusErr != nil {
+		mnetdLogger.Warnf("ReconcilePodLinks: failed to update the status of %s: %v", topo.GetName(), statusErr)
 	}
-	return nil
+	return err
 }
 
-// reconcilePodLinksInternal performs the actual network interface plumbing work.
-func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructured.Unstructured) error {
+// podReconcile is what a pass found: whether the pod runs on this node, so its links' status is
+// this daemon's to write, and that status.
+type podReconcile struct {
+	owned bool
+	links []v1beta1.LinkStatus
+}
+
+// reconcilePodLinksInternal performs the actual network interface plumbing work. A link that fails
+// is reported in its status and in the returned error, and the pass goes on with the others.
+func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructured.Unstructured) (podReconcile, error) {
 	if topo == nil {
-		return nil
+		return podReconcile{}, nil
 	}
 	srcIP, _, _ := unstructured.NestedString(topo.Object, "status", "src_ip")
 	currentNetNS, _, _ := unstructured.NestedString(topo.Object, "status", "net_ns")
@@ -202,21 +210,22 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 			mnetdLogger.Warnf("ReconcilePodLinks: local pod %s has stale netns path %s; clearing active status", topo.GetName(), currentNetNS)
 			_ = m.CleanupPodLinks(ctx, topo)
 			_ = m.clearPodAliveStatus(ctx, topo)
-			return nil
+			return podReconcile{}, nil
 		}
 	}
 
 	srcIP, netNS, active := isPodActive(topo)
 	if !active {
-		return nil
+		return podReconcile{}, nil
 	}
 	if m.nodeIP != "" && srcIP != m.nodeIP {
-		return nil
+		return podReconcile{}, nil
 	}
+	res := podReconcile{owned: true}
 
 	links, err := parsePodLinks(topo)
 	if err != nil {
-		return err
+		return res, err
 	}
 
 	// A link that left the spec goes first, from the pod and from the host, so its name is free for
@@ -226,17 +235,26 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 		keep[l.LinkUID] = true
 	}
 	if err := m.pruneRemovedLinks(topo, netNS, keep); err != nil {
-		return err
+		return res, err
 	}
 	if len(links) == 0 {
-		return nil
+		return res, nil
 	}
 
 	// Every interface wired here is declared and tagged as it is wired, and the tag is what a later
-	// prune looks for. A shaping or an uplink that fails is reported once the pass has wired the rest.
-	var deferred []error
+	// prune looks for. A link that fails is reported once the pass has wired the rest.
+	var errs []error
+	joins := make([]joinResult, len(links))
+	res.links = make([]v1beta1.LinkStatus, len(links))
 	peerCache := make(map[string]*unstructured.Unstructured)
-	for _, link := range links {
+	for i, link := range links {
+		st := &res.links[i]
+		*st = v1beta1.LinkStatus{UID: int(link.LinkUID), LocalIntf: link.LocalIntf, PeerPod: link.PeerPodName, Node: m.nodeName}
+		fail := func(what string, err error) {
+			mnetdLogger.Errorf("ReconcilePodLinks: %s %s of pod %s: %v", what, link.LocalIntf, topo.GetName(), err)
+			st.State, st.Error = v1beta1.LinkFailed, err.Error()
+			errs = append(errs, fmt.Errorf("%s: %w", link.LocalIntf, err))
+		}
 		// The external uplink: a macvlan on a node interface, with no peer pod to wait for and no
 		// node end, so it has no cable to unplug and carries its own shaping.
 		if link.PeerPodName == localhost {
@@ -245,9 +263,10 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 				err = wireutil.Declare(netNS, link.LocalIntf, link.LinkUID, link.PeerPodName, wireutil.NewUplinkDeclared(link), created)
 			}
 			if err != nil {
-				mnetdLogger.Errorf("ReconcilePodLinks: failed to wire macvlan %s@%s for pod %s: %v", link.LocalIntf, link.PeerIntf, topo.GetName(), err)
-				deferred = append(deferred, fmt.Errorf("uplink %s: %w", link.LocalIntf, err))
+				fail("failed to wire the uplink", err)
+				continue
 			}
+			joins[i] = joinResult{transport: "macvlan"}
 			continue
 		}
 
@@ -265,20 +284,24 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 		// The pod gets its interface whether its peer is up or not; it has no carrier until it is.
 		end := wireutil.NewPodEnd(netNS, link, mtu)
 		if _, err := wireutil.EnsurePodEnd(end); err != nil {
-			mnetdLogger.Errorf("ReconcilePodLinks: failed to plumb %s of pod %s: %v", link.LocalIntf, topo.GetName(), err)
-			return err
+			fail("failed to plumb", err)
+			continue
 		}
-		if err := m.joinLink(link, srcIP, netNS, end.Host, peerTopo); err != nil {
-			mnetdLogger.Errorf("ReconcilePodLinks: failed to join %s of pod %s to %s: %v", link.LocalIntf, topo.GetName(), link.PeerPodName, err)
-			return err
+		j, err := m.joinLink(link, srcIP, netNS, end.Host, peerTopo)
+		if err != nil {
+			fail("failed to join "+link.PeerPodName+" to", err)
+			continue
 		}
+		joins[i] = j
 		// The traffic towards this pod is shaped on its node end, as the peer declares what it sends.
 		if err := wireutil.ShapeHostEnd(end.Host, peerLinkShaping(peerTopo, link.LinkUID)); err != nil {
 			mnetdLogger.Errorf("ReconcilePodLinks: failed to shape %s of pod %s: %v", link.LocalIntf, topo.GetName(), err)
-			deferred = append(deferred, fmt.Errorf("shaping of %s, from %s: %w", link.LocalIntf, link.PeerPodName, err))
+			st.Error = fmt.Sprintf("shaping from %s: %v", link.PeerPodName, err)
+			errs = append(errs, fmt.Errorf("shaping of %s, from %s: %w", link.LocalIntf, link.PeerPodName, err))
 		}
 	}
-	return errors.Join(deferred...)
+	fillLinkStates(netNS, res.links, joins)
+	return res, errors.Join(errs...)
 }
 
 // peerLinkShaping returns the shaping the peer's Topology declares for what it sends on link uid.
@@ -298,40 +321,53 @@ func peerLinkUnplugged(peerTopo *unstructured.Unstructured, uid int64) bool {
 // joinLink joins the node end of a link to its peer's and sets the carrier the pod sees: none while
 // the peer is off or the cable is unplugged, the peer's admin state when both are on this node, up
 // across nodes. An unplugged link stays joined, so plugging it back is setting the node ends up.
-func (m *Meshnet) joinLink(link wireutil.PodLinkConfig, srcIP, netNS, hostEnd string, peerTopo *unstructured.Unstructured) error {
+func (m *Meshnet) joinLink(link wireutil.PodLinkConfig, srcIP, netNS, hostEnd string, peerTopo *unstructured.Unstructured) (joinResult, error) {
 	vxName := wireutil.HostVxlanName(link.KubeNs, link.PodName, link.LinkUID)
-	unplugged := link.Unplugged || peerLinkUnplugged(peerTopo, link.LinkUID)
+	j := joinResult{unplugged: link.Unplugged || peerLinkUnplugged(peerTopo, link.LinkUID)}
 	peerSrcIP, peerNetNS, peerActive := isPodActive(peerTopo)
 	if !peerActive {
 		m.forgetJoin(hostEnd)
 		_ = wireutil.RemoveHostLink(vxName)
-		return wireutil.SetHostEndUp(hostEnd, false)
+		j.peerOff = true
+		return j, wireutil.SetHostEndUp(hostEnd, false)
 	}
 	if peerSrcIP == srcIP {
 		_ = wireutil.RemoveHostLink(vxName)
+		j.transport = "veth"
 		peerHost := wireutil.HostEndName(link.KubeNs, link.PeerPodName, link.LinkUID)
 		if !wireutil.HostLinkExists(peerHost) {
 			// The peer's own reconcile makes its end, and joins the two.
 			m.forgetJoin(hostEnd)
 			m.enqueueReconcile(fmt.Sprintf("%s/%s", link.KubeNs, link.PeerPodName))
-			return wireutil.SetHostEndUp(hostEnd, false)
+			return j, wireutil.SetHostEndUp(hostEnd, false)
 		}
 		if err := wireutil.JoinHostEnds(hostEnd, peerHost); err != nil {
-			return err
+			return j, err
 		}
-		m.rememberJoin(hostEnd, hostJoin{peerHost: peerHost, netNS: netNS, intf: link.LocalIntf, peerNetNS: peerNetNS, peerIntf: link.PeerIntf, unplugged: unplugged})
+		m.rememberJoin(hostEnd, hostJoin{peerHost: peerHost, netNS: netNS, intf: link.LocalIntf, peerNetNS: peerNetNS, peerIntf: link.PeerIntf,
+			unplugged: j.unplugged, podKey: link.KubeNs + "/" + link.PodName, peerKey: link.KubeNs + "/" + link.PeerPodName})
 		m.syncCarrier(hostEnd)
-		return nil
+		return j, nil
 	}
 	m.forgetJoin(hostEnd)
 	remote := net.ParseIP(peerSrcIP)
 	if remote == nil {
-		return fmt.Errorf("peer %s has an unusable node address %q", link.PeerPodName, peerSrcIP)
+		return j, fmt.Errorf("peer %s has an unusable node address %q", link.PeerPodName, peerSrcIP)
 	}
-	if err := wireutil.JoinVxlan(hostEnd, vxName, int(link.LinkUID+vxlanBase), remote, m.nodeIntf); err != nil {
-		return err
+	j.transport, j.vni = "vxlan", int(link.LinkUID+vxlanBase)
+	if err := wireutil.JoinVxlan(hostEnd, vxName, j.vni, remote, m.nodeIntf); err != nil {
+		return j, err
 	}
-	return wireutil.SetHostEndUp(hostEnd, !unplugged)
+	return j, wireutil.SetHostEndUp(hostEnd, !j.unplugged)
+}
+
+// joinResult is how joinLink left a link: its transport, and whether it has no carrier because the
+// peer is off or the cable unplugged.
+type joinResult struct {
+	transport string
+	vni       int
+	peerOff   bool
+	unplugged bool
 }
 
 // hostJoin is a same-node join as seen from one of its node ends.
@@ -340,6 +376,9 @@ type hostJoin struct {
 	netNS, intf         string
 	peerNetNS, peerIntf string
 	unplugged           bool
+	// podKey and peerKey are the two pods, reconciled when the watcher changes their carrier so
+	// their status follows.
+	podKey, peerKey string
 }
 
 // rememberJoin records a same-node join under both of its node ends, for the carrier watcher.
@@ -350,7 +389,8 @@ func (m *Meshnet) rememberJoin(hostEnd string, j hostJoin) {
 		m.joins = make(map[string]hostJoin)
 	}
 	m.joins[hostEnd] = j
-	m.joins[j.peerHost] = hostJoin{peerHost: hostEnd, netNS: j.peerNetNS, intf: j.peerIntf, peerNetNS: j.netNS, peerIntf: j.intf, unplugged: j.unplugged}
+	m.joins[j.peerHost] = hostJoin{peerHost: hostEnd, netNS: j.peerNetNS, intf: j.peerIntf, peerNetNS: j.netNS, peerIntf: j.intf, unplugged: j.unplugged,
+		podKey: j.peerKey, peerKey: j.podKey}
 }
 
 // forgetJoin drops the same-node join of a node end, if it has one, from both sides.
@@ -428,9 +468,15 @@ func (m *Meshnet) watchHostEnds(ctx context.Context) {
 				if u.Header.Type == unix.RTM_DELLINK {
 					m.forgetJoin(name)
 					_ = wireutil.SetHostEndUp(j.peerHost, false)
-					continue
+				} else {
+					m.syncCarrier(name)
 				}
-				m.syncCarrier(name)
+				// The status of both pods follows; a pass that changes nothing writes nothing.
+				for _, key := range []string{j.podKey, j.peerKey} {
+					if key != "" {
+						m.enqueueReconcile(key)
+					}
+				}
 			}
 		}
 		close(done)
@@ -462,6 +508,7 @@ func (m *Meshnet) CleanupPodLinks(ctx context.Context, topo *unstructured.Unstru
 	if topo == nil {
 		return nil
 	}
+	m.forgetLinks(topo.GetNamespace() + "/" + topo.GetName())
 	links, err := parsePodLinks(topo)
 	if err != nil {
 		return err
@@ -873,6 +920,7 @@ func (m *Meshnet) RunControllerLoop(ctx context.Context) {
 	mnetdLogger.Infof("Topology informer cache synced successfully")
 	m.enqueueFullReconcile()
 	go m.watchHostEnds(ctx)
+	go m.serveMetrics(ctx)
 	// The informer's resync reconciles every pod each minute; what a pod that left this node leaves
 	// on it is swept at the same pace.
 	ticker := time.NewTicker(resyncPeriod)
@@ -885,40 +933,4 @@ func (m *Meshnet) RunControllerLoop(ctx context.Context) {
 			_ = m.CleanupOrphanedHostLinks(ctx)
 		}
 	}
-}
-
-// updatePlumbingErrorStatus writes the provided plumbing error message (or clears it if empty)
-// to the Topology resource's status.plumbing_error field.
-func (m *Meshnet) updatePlumbingErrorStatus(ctx context.Context, topo *unstructured.Unstructured, errMsg string) error {
-	if m.tClient == nil {
-		return fmt.Errorf("topology client not initialized")
-	}
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latestTopo, err := m.tClient.Topology(topo.GetNamespace()).Unstructured(ctx, topo.GetName(), metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-
-		currErr, found, _ := unstructured.NestedString(latestTopo.Object, "status", "plumbing_error")
-		if errMsg == "" {
-			if !found || currErr == "" {
-				return nil
-			}
-			unstructured.RemoveNestedField(latestTopo.Object, "status", "plumbing_error")
-		} else {
-			if found && currErr == errMsg {
-				return nil
-			}
-			if err := unstructured.SetNestedField(latestTopo.Object, errMsg, "status", "plumbing_error"); err != nil {
-				return err
-			}
-		}
-
-		_, err = m.tClient.Topology(latestTopo.GetNamespace()).Update(ctx, latestTopo, metav1.UpdateOptions{})
-		if err == nil && m.topoCache != nil {
-			m.topoCache.Put(latestTopo)
-		}
-		return err
-	})
 }

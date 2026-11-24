@@ -153,8 +153,10 @@ func EnsurePodEnd(e PodEnd) (bool, error) {
 	if !tempInPod {
 		return false, Declare(e.NetNS, e.Name, e.UID, e.Peer, e.Declared, false)
 	}
-	// Made now or by a pass that failed before the rename: declared in full, then named and up.
+	// Made now or by a pass that failed before the rename: declared in full, then named and up. A
+	// declaration that fails takes the pair along, untagged as it is, so nothing is left half made.
 	if err := Declare(e.NetNS, e.Temp, e.UID, e.Peer, e.Declared, true); err != nil {
+		_ = podNs.Do(func(_ ns.NetNS) error { return delLinkByName(e.Temp) })
 		return created, err
 	}
 	return created, podNs.Do(func(_ ns.NetNS) error {

@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"strconv"
 	"strings"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // linkTagPrefix starts the alias meshnet writes on every interface it wires in a pod, so a link
@@ -191,4 +193,41 @@ func MakeMacvlan(nsPath, name, parent string) (bool, error) {
 		}
 		return nil
 	})
+}
+
+// EndState is what the daemon reports of an interface in a pod.
+type EndState struct {
+	Index   int
+	MAC     string
+	MTU     int
+	AdminUp bool
+	Carrier bool
+}
+
+// ReadEnds reads names from the netns at nsPath in one visit; a name that is not there is left out.
+func ReadEnds(nsPath string, names []string) (map[string]EndState, error) {
+	podNs, err := ns.GetNS(nsPath)
+	if err != nil {
+		return nil, fmt.Errorf("could not open netns %s: %w", nsPath, err)
+	}
+	defer podNs.Close()
+	out := make(map[string]EndState, len(names))
+	err = podNs.Do(func(_ ns.NetNS) error {
+		for _, name := range names {
+			l, err := netlink.LinkByName(name)
+			if err != nil {
+				continue
+			}
+			a := l.Attrs()
+			out[name] = EndState{
+				Index:   a.Index,
+				MAC:     a.HardwareAddr.String(),
+				MTU:     a.MTU,
+				AdminUp: a.Flags&net.FlagUp != 0,
+				Carrier: a.RawFlags&unix.IFF_LOWER_UP != 0,
+			}
+		}
+		return nil
+	})
+	return out, err
 }

@@ -129,6 +129,10 @@ func (m *Meshnet) SetAlive(ctx context.Context, pod *mpb.Pod) (*mpb.BoolResponse
 		if err = unstructured.SetNestedField(result.Object, pod.ContainerId, "status", "container_id"); err != nil {
 			mnetdLogger.Errorf("Failed to update pod's container_id")
 		}
+		// A pod that goes takes its interfaces, and with them the state of its links.
+		if pod.NetNs == "" {
+			unstructured.RemoveNestedField(result.Object, "status", "links")
+		}
 
 		return m.updateStatus(ctx, result, pod.KubeNs)
 	})
@@ -142,6 +146,9 @@ func (m *Meshnet) SetAlive(ctx context.Context, pod *mpb.Pod) (*mpb.BoolResponse
 		return &mpb.BoolResponse{Response: false}, retryErr
 	}
 
+	if pod.NetNs == "" {
+		m.forgetLinks(pod.KubeNs + "/" + pod.Name)
+	}
 	m.enqueuePodAndDependents(pod.KubeNs, pod.Name)
 	return &mpb.BoolResponse{Response: true}, nil
 }

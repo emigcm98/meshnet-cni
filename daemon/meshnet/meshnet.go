@@ -14,13 +14,18 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/reflection"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/homedir"
 
 	topologyclientv1 "github.com/emigcm98/meshnet-cni/api/clientset/v1beta1"
+	"github.com/emigcm98/meshnet-cni/api/types/v1beta1"
 	"github.com/emigcm98/meshnet-cni/utils/wireutil"
 
 	mpb "github.com/emigcm98/meshnet-cni/daemon/proto/meshnet/v1beta1"
@@ -51,6 +56,12 @@ type Meshnet struct {
 	// joins are the same-node joins by node end, for the carrier watcher.
 	joinsMu sync.Mutex
 	joins   map[string]hostJoin
+	// nodeName is reported in each link's status, recorder makes the links' events, and podLinks
+	// keeps the last status of each local pod's links for the metrics.
+	nodeName string
+	recorder record.EventRecorder
+	linksMu  sync.Mutex
+	podLinks map[string][]v1beta1.LinkStatus
 }
 
 var mnetdLogger = log.WithFields(log.Fields{"daemon": "meshnetd"})
@@ -134,7 +145,9 @@ func New(cfg Config) (*Meshnet, error) {
 		defaultMTU:     defaultMTU,
 		topoCache:      NewTopologyCache(),
 		reconcileQueue: NewReconcileQueue(50 * time.Millisecond),
+		nodeName:       nodeName(),
 	}
+	m.recorder = newRecorder(kClient, m.nodeName)
 	mpb.RegisterLocalServer(m.s, m)
 	reflection.Register(m.s)
 
@@ -190,4 +203,23 @@ func newServerWithLogging(opts ...grpc.ServerOption) *grpc.Server {
 		grpc.ChainStreamInterceptor(logging.StreamServerInterceptor(interceptorLogger(lEntry))),
 	)
 	return grpc.NewServer(opts...)
+}
+
+// nodeName is the node the daemon runs on, from the downward API, or the host's name.
+func nodeName() string {
+	if n := os.Getenv("NODE_NAME"); n != "" {
+		return n
+	}
+	n, _ := os.Hostname()
+	return n
+}
+
+// newRecorder makes the recorder of the links' events, nil without a Kubernetes client.
+func newRecorder(kClient kubernetes.Interface, node string) record.EventRecorder {
+	if kClient == nil {
+		return nil
+	}
+	b := record.NewBroadcaster()
+	b.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kClient.CoreV1().Events("")})
+	return b.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "meshnetd", Host: node})
 }

@@ -32,6 +32,34 @@ type TopologyStatus struct {
 	ContainerID string    `json:"container_id"`
 	// PlumbingError is the error of the last reconcile of the pod's links, empty when they are wired.
 	PlumbingError string `json:"plumbing_error,omitempty"`
+	// Links is the state of each of the pod's links as the daemon of its node last saw it.
+	Links []LinkStatus `json:"links,omitempty"`
+}
+
+// The states of a link end in LinkStatus.
+const (
+	LinkUp        = "up"        // wired, with carrier
+	LinkDown      = "down"      // wired, without carrier: this port or the peer's is shut
+	LinkOff       = "off"       // the peer is not running; the interface waits for it
+	LinkUnplugged = "unplugged" // the cable pulled by either end's declaration
+	LinkFailed    = "failed"    // could not be wired; Error says why
+)
+
+// LinkStatus is the state of one end of a link, in the Topology of the pod that has it.
+type LinkStatus struct {
+	UID       int    `json:"uid"`
+	LocalIntf string `json:"local_intf"`
+	PeerPod   string `json:"peer_pod"`
+	State     string `json:"state"`
+	// Transport is veth (both ends on one node), vxlan (across nodes) or macvlan (an uplink); empty
+	// while the peer is off.
+	Transport string `json:"transport,omitempty"`
+	Node      string `json:"node,omitempty"`
+	IfIndex   int    `json:"ifindex,omitempty"`
+	MAC       string `json:"mac,omitempty"`
+	MTU       int    `json:"mtu,omitempty"`
+	VNI       int    `json:"vni,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type Skipped struct {

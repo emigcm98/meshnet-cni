@@ -29,6 +29,9 @@ spec:
           image: ghcr.io/emigcm98/meshnet:latest
           imagePullPolicy: IfNotPresent
           command: ["./entrypoint.sh"]
+          ports:
+            - name: metrics
+              containerPort: 51112
           # Ready means the daemon has chained meshnet into the node's CNI configuration, not just started.
           readinessProbe:
             exec:
