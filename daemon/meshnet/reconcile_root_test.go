@@ -2,6 +2,7 @@ package meshnet
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -582,6 +583,32 @@ func rootQdiscType(t *testing.T, name string) string {
 
 // What an end declares it sends is shaped on the node end of the other side, on one node and across
 // nodes, follows the declaration, and an invalid one is reported without keeping the link unwired.
+// redirectTarget is the name of the link the ingress of the node link name redirects into.
+func redirectTarget(t *testing.T, name string) string {
+	t.Helper()
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	filters, err := netlink.FilterList(l, netlink.HANDLE_MIN_INGRESS)
+	if err != nil || len(filters) != 1 {
+		return ""
+	}
+	m, ok := filters[0].(*netlink.MatchAll)
+	if !ok || len(m.Actions) != 1 {
+		return ""
+	}
+	a, ok := m.Actions[0].(*netlink.MirredAction)
+	if !ok {
+		return ""
+	}
+	target, err := netlink.LinkByIndex(a.Ifindex)
+	if err != nil {
+		return ""
+	}
+	return target.Attrs().Name
+}
+
 func TestReconcileShaping(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("Test requires root privileges. Run test with sudo")
@@ -611,6 +638,10 @@ func TestReconcileShaping(t *testing.T) {
 	m.mustReconcile(t, topos(map[string]interface{}{"delay": "20ms"})...)
 	hostA24, hostB24 := wireutil.HostEndName("default", "a", 24), wireutil.HostEndName("default", "b", 24)
 	hostA25 := wireutil.HostEndName("default", "a", 25)
+	t.Cleanup(func() {
+		_ = wireutil.RemoveSegmenter(hostA24)
+		_ = wireutil.RemoveSegmenter(hostA25)
+	})
 	if got := rootQdiscType(t, hostA24); got != "netem" {
 		t.Errorf("what b sends towards a is not shaped on a's node end: %q", got)
 	}
@@ -621,7 +652,29 @@ func TestReconcileShaping(t *testing.T) {
 		t.Errorf("what c sends from another node is not shaped on a's node end: %q", got)
 	}
 
+	// Loss from c, across nodes, goes through the segmenting hop of a's node end; a delay needs none.
+	vxA25 := wireutil.HostVxlanName("default", "a", 25)
+	if !wireutil.HostLinkExists(wireutil.SegmenterName(hostA25)) || redirectTarget(t, vxA25) != wireutil.SegmenterName(hostA25) {
+		t.Errorf("loss across nodes: %s redirects into %q, want the segmenting hop of %s", vxA25, redirectTarget(t, vxA25), hostA25)
+	}
+	if wireutil.HostLinkExists(wireutil.SegmenterName(hostA24)) {
+		t.Errorf("a delay got a segmenting hop on %s", hostA24)
+	}
+	// Loss from b, on one node, gets one too, and the link carries through it; it goes with the loss.
+	m.mustReconcile(t, topos(map[string]interface{}{"loss": "1%"})...)
+	if got := redirectTarget(t, hostB24); got != wireutil.SegmenterName(hostA24) {
+		t.Errorf("loss on one node: %s redirects into %q, want the segmenting hop of %s", hostB24, got, hostA24)
+	}
+	if !udpReaches(t, nsB, nsA, "10.24.0.1") {
+		t.Errorf("b does not reach a through the segmenting hop")
+	}
 	m.mustReconcile(t, topos(map[string]interface{}{"qdisc": "tbf", "rate": "1mbit"})...)
+	if wireutil.HostLinkExists(wireutil.SegmenterName(hostA24)) || redirectTarget(t, hostB24) != hostA24 {
+		t.Errorf("without loss: the hop of %s is still there or %s redirects into %q", hostA24, hostB24, redirectTarget(t, hostB24))
+	}
+	if !udpReaches(t, nsB, nsA, "10.24.0.1") {
+		t.Errorf("b does not reach a once the segmenting hop is gone")
+	}
 	if got := rootQdiscType(t, hostA24); got != "tbf" {
 		t.Errorf("b's new shaping did not reach a's node end: %q", got)
 	}
@@ -777,5 +830,58 @@ func (m *Meshnet) putAPI(t *testing.T, topo *unstructured.Unstructured) {
 	}
 	if _, err := m.tClient.Topology(topo.GetNamespace()).Update(ctx, next, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("writing %s to the fake API: %v", topo.GetName(), err)
+	}
+}
+
+// The orphan pass removes the segmenting hop of a node end that is gone, keeps one whose node end is
+// there, and leaves alone a link of the node that only looks like a hop by its name.
+func TestCleanupOrphanedSegmenters(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	InitLogger()
+	nsA := newNS(t)
+	defer nsA.Close()
+	var ends []wireutil.PodEnd
+	for _, uid := range []int64{31, 32} {
+		cfg := wireutil.PodLinkConfig{PodName: "a", PeerPodName: "b", LinkUID: uid, KubeNs: "default", LocalIntf: fmt.Sprintf("eth%d", uid-30)}
+		end := wireutil.NewPodEnd(nsA.Path(), cfg, 1450)
+		if _, err := wireutil.EnsurePodEnd(end); err != nil {
+			t.Fatalf("EnsurePodEnd(%s): %v", cfg.LocalIntf, err)
+		}
+		if err := wireutil.SetSegmenter(end.Host, true); err != nil {
+			t.Fatalf("SetSegmenter(%s): %v", end.Host, err)
+		}
+		host, hop := end.Host, wireutil.SegmenterName(end.Host)
+		t.Cleanup(func() {
+			_ = wireutil.RemoveSegmenter(host)
+			_ = wireutil.RemoveHostLink(host)
+		})
+		if !wireutil.HostLinkExists(hop) {
+			t.Fatalf("no segmenting hop %s for %s", hop, host)
+		}
+		ends = append(ends, end)
+	}
+	lookalike := "ms0000test"
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: lookalike}}); err != nil {
+		t.Fatalf("adding %s: %v", lookalike, err)
+	}
+	t.Cleanup(func() { _ = wireutil.RemoveHostLink(lookalike) })
+	// The first pod end goes, taking its node end along.
+	if err := wireutil.RemoveHostLink(ends[0].Host); err != nil {
+		t.Fatalf("removing %s: %v", ends[0].Host, err)
+	}
+	m := &Meshnet{}
+	if err := m.CleanupOrphanedHostLinks(context.Background()); err != nil {
+		t.Fatalf("CleanupOrphanedHostLinks: %v", err)
+	}
+	if wireutil.HostLinkExists(wireutil.SegmenterName(ends[0].Host)) {
+		t.Errorf("the hop of the gone node end %s outlived it", ends[0].Host)
+	}
+	if !wireutil.HostLinkExists(wireutil.SegmenterName(ends[1].Host)) {
+		t.Errorf("the hop of %s went with its node end still there", ends[1].Host)
+	}
+	if !wireutil.HostLinkExists(lookalike) {
+		t.Errorf("the orphan pass removed %s, a dummy that only looks like a hop", lookalike)
 	}
 }

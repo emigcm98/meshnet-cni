@@ -1,7 +1,9 @@
 #!/bin/bash
 # The tx offloads of the pod ends: the kernel's by default, off where a link says offloads: false and
 # back when it stops saying it, live; with them on, one TCP stream carries well over twice what it
-# does with them off, on one node and across workers. o1 and o2 share worker A, o3 sits on worker B.
+# does with them off, on one node and across workers. And with them on, a loss in the shaping still
+# drops packets, not the frames of many segments they hand over: netem's drops against the segments
+# that reach the pod, from the daemon's metrics. o1 and o2 share worker A, o3 sits on worker B.
 # Usage: tests/offloads.sh [worker-a] [worker-b]; KUBECTL_CONTEXT picks the cluster.
 A=${1:-meshnet-worker}; B=${2:-meshnet-worker2}
 K="kubectl ${KUBECTL_CONTEXT:+--context $KUBECTL_CONTEXT}"
@@ -82,6 +84,27 @@ faster() { # description on off
     fails=$((fails + 1)); echo "[FAIL] $1: ${2:-none} Mbit/s with the offloads on, ${3:-none} off; want over twice"
   fi
 }
+# metric prints the value of a link metric of pod $2, interface $3, from the daemon on node $1.
+metric() {
+  $K -n meshnet exec "$($K -n meshnet get pod -l name=meshnet --field-selector spec.nodeName=$1 -o jsonpath='{.items[0].metadata.name}')" -- wget -qO- localhost:51112/metrics |
+    sed -n "s/^$4{namespace=\"$NS\",pod=\"$2\",interface=\"$3\",[^}]*} \([0-9]*\)$/\1/p"
+}
+# per_packet sends one TCP stream for 5 s from o1 to address $1 and checks that netem dropped, per
+# segment that reached pod $3 on node $2, close to the 2 % declared: whole frames would give about a
+# twentieth of it. A full segment is the link's MTU, 1450, and its Ethernet header.
+per_packet() { # address node pod description
+  local d0 b0 d1 b1 out
+  d0=$(metric $2 $3 eth1 meshnet_link_shaping_drops_total); b0=$(metric $2 $3 eth1 meshnet_link_receive_bytes_total)
+  out=$($K -n $NS exec o1 -- iperf3 -c $1 -t 5 -J 2>/dev/null)
+  d1=$(metric $2 $3 eth1 meshnet_link_shaping_drops_total); b1=$(metric $2 $3 eth1 meshnet_link_receive_bytes_total)
+  local ratio=$(awk -v d=$((d1 - d0)) -v b=$((b1 - b0)) 'BEGIN { if (b > 0) printf "%.4f", d * 1464 / b; else print 0 }')
+  local rtx=$(echo "$out" | jq '.end.sum_sent.retransmits' 2>/dev/null)
+  if awk -v r=$ratio 'BEGIN { exit !(r > 0.01 && r < 0.04) }'; then
+    echo "[OK ] $4: $((d1 - d0)) drops, $ratio per segment, $rtx retransmissions"
+  else
+    fails=$((fails + 1)); echo "[FAIL] $4: $((d1 - d0)) drops, $ratio per segment, $rtx retransmissions; want about 0.02"
+  fi
+}
 start() {
   if ! { pod $1 $2 | $K apply -f - >/dev/null && $K -n $NS wait --timeout=180s --for condition=Ready pod/$1 >/dev/null; }; then
     fails=$((fails + 1)); echo "[FAIL] $1 did not start on $2"
@@ -106,6 +129,14 @@ faster "one TCP stream across workers" "$across_on" "$across_off"
 
 offloads o1 0 null; offloads o2 0 null; offloads o1 1 null; offloads o3 0 null
 check "with offloads dropped the ends get the kernel's back" eval 'is o1 eth1 on && is o2 eth1 on && is o1 eth2 on && is o3 eth1 on'
+
+$K -n $NS patch topology o1 --type=json -p '[{"op":"add","path":"/spec/links/0/shaping","value":{"loss":"2%"}},{"op":"add","path":"/spec/links/1/shaping","value":{"loss":"2%"}}]' >/dev/null
+sleep 5 # a pass of each pod's daemon, which the change wakes at once
+per_packet 10.48.1.2 $A o2 "a 2% loss on one node drops packets, not frames"
+per_packet 10.48.2.3 $B o3 "a 2% loss across workers drops packets, not frames"
+$K -n $NS patch topology o1 --type=json -p '[{"op":"remove","path":"/spec/links/0/shaping"},{"op":"remove","path":"/spec/links/1/shaping"}]' >/dev/null
+sleep 5
+check "with the loss dropped o1 reaches o2 and o3 again, around the hop" eval "$K -n $NS exec o1 -- ping -c 3 -W 1 10.48.1.2 && $K -n $NS exec o1 -- ping -c 3 -W 1 10.48.2.3"
 
 $K delete ns $NS --wait=true >/dev/null 2>&1
 echo "offloads test: $fails failed"

@@ -290,17 +290,29 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 			fail("failed to plumb", err)
 			continue
 		}
+		// The traffic towards this pod is shaped on its node end, as the peer declares what it sends. A
+		// shaping that drops, duplicates, reorders or corrupts packets gets the segmenting hop in front
+		// of the node end, set before the join, which goes through it when it is there; an invalid
+		// shaping leaves the hop as it is, as it leaves the last valid one on the node end.
+		shaping := peerLinkShaping(peerTopo, link.LinkUID)
+		var segErr error
+		if shaping.Validate() == nil {
+			segErr = wireutil.SetSegmenter(end.Host, shaping.PerPacket())
+		}
 		j, err := m.joinLink(link, srcIP, netNS, end.Host, peerTopo)
 		if err != nil {
 			fail("failed to join "+link.PeerPodName+" to", err)
 			continue
 		}
 		joins[i] = j
-		// The traffic towards this pod is shaped on its node end, as the peer declares what it sends.
-		if err := wireutil.ShapeHostEnd(end.Host, peerLinkShaping(peerTopo, link.LinkUID)); err != nil {
-			mnetdLogger.Errorf("ReconcilePodLinks: failed to shape %s of pod %s: %v", link.LocalIntf, topo.GetName(), err)
-			st.Error = fmt.Sprintf("shaping from %s: %v", link.PeerPodName, err)
-			errs = append(errs, fmt.Errorf("shaping of %s, from %s: %w", link.LocalIntf, link.PeerPodName, err))
+		shapeErr := wireutil.ShapeHostEnd(end.Host, shaping)
+		if shapeErr == nil && segErr != nil {
+			shapeErr = fmt.Errorf("loss, duplication, reordering and corruption act on whole frames: %w", segErr)
+		}
+		if shapeErr != nil {
+			mnetdLogger.Errorf("ReconcilePodLinks: failed to shape %s of pod %s: %v", link.LocalIntf, topo.GetName(), shapeErr)
+			st.Error = fmt.Sprintf("shaping from %s: %v", link.PeerPodName, shapeErr)
+			errs = append(errs, fmt.Errorf("shaping of %s, from %s: %w", link.LocalIntf, link.PeerPodName, shapeErr))
 		}
 	}
 	fillLinkStates(netNS, res.links, joins)
@@ -499,14 +511,16 @@ func (m *Meshnet) pruneRemovedLinks(topo *unstructured.Unstructured, netNS strin
 		if r.Peer == localhost {
 			continue
 		}
-		m.forgetJoin(wireutil.HostEndName(topo.GetNamespace(), topo.GetName(), r.UID))
+		hostEnd := wireutil.HostEndName(topo.GetNamespace(), topo.GetName(), r.UID)
+		m.forgetJoin(hostEnd)
+		_ = wireutil.RemoveSegmenter(hostEnd)
 		_ = wireutil.RemoveHostLink(wireutil.HostVxlanName(topo.GetNamespace(), topo.GetName(), r.UID))
 	}
 	return nil
 }
 
 // CleanupPodLinks removes what a pod's links keep on the node once the pod is gone: its node ends go
-// with its netns, the vxlans that carried them stay and go here.
+// with its netns, the vxlans that carried them and their segmenting hops stay and go here.
 func (m *Meshnet) CleanupPodLinks(ctx context.Context, topo *unstructured.Unstructured) error {
 	if topo == nil {
 		return nil
@@ -520,7 +534,9 @@ func (m *Meshnet) CleanupPodLinks(ctx context.Context, topo *unstructured.Unstru
 		if link.PeerPodName == localhost {
 			continue
 		}
-		m.forgetJoin(wireutil.HostEndName(link.KubeNs, link.PodName, link.LinkUID))
+		hostEnd := wireutil.HostEndName(link.KubeNs, link.PodName, link.LinkUID)
+		m.forgetJoin(hostEnd)
+		_ = wireutil.RemoveSegmenter(hostEnd)
 		_ = wireutil.RemoveHostLink(wireutil.HostVxlanName(link.KubeNs, link.PodName, link.LinkUID))
 	}
 	return nil
@@ -779,9 +795,9 @@ func (m *Meshnet) enqueuePodAndDependents(ns, name string) {
 	}
 }
 
-// CleanupOrphanedHostLinks removes what no pod uses any more from the node: a vxlan whose node end is
-// gone (its pod went, or the link moved onto one node) and the host veths of the previous wiring, which
-// joined two pods directly and are never made now.
+// CleanupOrphanedHostLinks removes what no pod uses any more from the node: a vxlan or a segmenting
+// hop whose node end is gone (its pod went, or the link moved onto one node) and the host veths of the
+// previous wiring, which joined two pods directly and are never made now.
 func (m *Meshnet) CleanupOrphanedHostLinks(ctx context.Context) error {
 	hostLinks, err := netlink.LinkList()
 	if err != nil {
@@ -794,7 +810,8 @@ func (m *Meshnet) CleanupOrphanedHostLinks(ctx context.Context) error {
 	for _, l := range hostLinks {
 		name := l.Attrs().Name
 		orphan := strings.HasPrefix(name, wireutil.LegacyHostVethPrefix) ||
-			(wireutil.IsHostVxlan(name) && !present[wireutil.HostEndOfVxlan(name)])
+			(wireutil.IsHostVxlan(name) && !present[wireutil.HostEndOfVxlan(name)]) ||
+			(wireutil.IsSegmenter(name) && l.Type() == "veth" && !present[wireutil.HostEndOfSegmenter(name)])
 		if orphan {
 			mnetdLogger.Infof("CleanupOrphanedHostLinks: removing %s, which no pod uses", name)
 			_ = netlink.LinkDel(l)
