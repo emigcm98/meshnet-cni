@@ -59,7 +59,7 @@ spec:
                       type: integer
                       minimum: 0
                     offloads:
-                      description: '(Optional) Keep the kernel tx offloads on the local end, switched off when absent'
+                      description: '(Optional) The tx offloads of the local end: true switches them on, false off; when absent the end keeps the kernel''s, on for a veth'
                       type: boolean
                     unplugged:
                       description: '(Optional) The cable pulled: both ends lose carrier and keep their configuration; either end declaring it unplugs the link'

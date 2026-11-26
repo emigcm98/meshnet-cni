@@ -73,6 +73,27 @@ func TestParsePodLinks(t *testing.T) {
 	}
 }
 
+// offloads is three states: absent is the kernel's, apart from false.
+func TestParsePodLinks_Offloads(t *testing.T) {
+	pod := createFakePodTopology("p1", "default", "10.0.0.1", "/proc/1/ns/net", []string{"p2", "p3", "p4"})
+	raw := pod.Object["spec"].(map[string]interface{})["links"].([]interface{})
+	raw[1].(map[string]interface{})["offloads"] = false
+	raw[2].(map[string]interface{})["offloads"] = true
+	links, err := parsePodLinks(pod)
+	if err != nil {
+		t.Fatalf("parsePodLinks failed: %v", err)
+	}
+	if links[0].Offloads != nil {
+		t.Errorf("absent offloads parsed as %t, want nil", *links[0].Offloads)
+	}
+	if links[1].Offloads == nil || *links[1].Offloads {
+		t.Errorf("offloads: false parsed as %v", links[1].Offloads)
+	}
+	if links[2].Offloads == nil || !*links[2].Offloads {
+		t.Errorf("offloads: true parsed as %v", links[2].Offloads)
+	}
+}
+
 func TestReconcilePodLinks_SkipInactivePeer(t *testing.T) {
 	InitLogger()
 	m := &Meshnet{

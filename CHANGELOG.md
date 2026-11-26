@@ -8,7 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - `meshnetd` wires the links: a controller watches the Topology resources and reconciles every local pod when it or a peer changes and once a minute, so a link removed by hand or left behind by a moved pod comes back by itself. The reconcile's last error is in `status.plumbing_error`.
 - `mtu` per link, optional: both ends get the larger of the two requests, `LINK_MTU` on the daemon when neither asks, and otherwise what a vxlan over the node's interface carries, 1450 on a 1500 network, on one node as across nodes.
-- A link declares more of its end, all optional: `addresses` of either family beyond `local_ip`, `mac`, `txqueuelen` and `offloads`. A declaration is applied when the interface is made and, property by property, whenever it changes, on running pods too; what the workload changes by hand in between stays, and meshnet only ever removes the addresses it put there.
+- A link declares more of its end, all optional: `addresses` of either family beyond `local_ip`, `mac`, `txqueuelen` and `offloads` (absent keeps the kernel's transmit offloads, `false` switches them off, `true` on). A declaration is applied when the interface is made and, property by property, whenever it changes, on running pods too; what the workload changes by hand in between stays, and meshnet only ever removes the addresses it put there.
 - `unplugged` on a link pulls the cable: both pods keep their interfaces administratively up, with their configuration, and lose carrier until it is plugged back, on one node as across nodes. Either end can declare it.
 - The state of each link in `status.links` of its pod's Topology (state, transport, node, ifindex, MAC, MTU, VNI, error), written when it changes, and an event on the Topology for each change: `Wired`, `Unwired`, `LinkUp`, `LinkDown` and the warning `WiringFailed`. `kubectl get topology` shows the node address and the links' states.
 - Prometheus metrics on port 51112 of each node: each link's state and, from its node end, the bytes, packets and drops its pod received and sent, and the drops of its shaping.
@@ -18,7 +18,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
-- Links are made with netlink instead of koko; the link description and the offloads switched off on each end come from KNE's meshnet (`wireutil/veth.go`).
+- Links are made with netlink instead of koko; the link description and the offloads that `offloads: false` switches off come from KNE's meshnet (`wireutil/veth.go`).
+- Each end keeps the kernel's transmit offloads unless its link says `offloads: false`, where stock switched off the checksum offload of the veths within a node, which held a TCP stream to what one core could segment and checksum: about five times the throughput on one node.
 - The plugin only registers the pod with the daemon and waits up to 30 s for its interfaces, then lets the pod start; the controller and its tests come from KNE's meshnet. `status.skipped` is no longer read.
 - A link that fails no longer stops the pass over its pod: it is marked failed and the other links are wired.
 - Each end of a link in a pod is a veth whose other end stays on the node, joined to its peer's by tc redirects or a vxlan between nodes, so a pod's interface never changes when its peer moves. A pod gets its interfaces as soon as it starts, whether its peers are up or not. The node ends sit at the largest MTU a veth takes, so the pod ends alone decide a link's MTU.

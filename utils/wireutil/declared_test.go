@@ -22,6 +22,7 @@ type iface struct {
 	alias    string
 	addrs    map[string]int // CIDR to its address protocol
 	offloads bool           // tx-checksum-ip-generic
+	tso      bool           // tx-tcp-segmentation
 }
 
 // has says whether the interface has address a, whoever put it there.
@@ -65,13 +66,15 @@ func readIface(t *testing.T, netNS ns.NetNS, name string) iface {
 		if err != nil {
 			return err
 		}
-		got.offloads = features["tx-checksum-ip-generic"]
+		got.offloads, got.tso = features["tx-checksum-ip-generic"], features["tx-tcp-segmentation"]
 		return nil
 	}); err != nil {
 		t.Fatalf("reading %s: %v", name, err)
 	}
 	return got
 }
+
+func boolp(b bool) *bool { return &b }
 
 // in runs cmd in netNS, failing the test on error.
 func in(t *testing.T, netNS ns.NetNS, what string, cmd func() error) {
@@ -99,7 +102,7 @@ func TestDeclareFresh(t *testing.T) {
 	}
 	netNS := newNS(t)
 	cfg := wireutil.PodLinkConfig{PodName: "a", PeerPodName: "b", LinkUID: 1, KubeNs: "decl", LocalIntf: "eth1",
-		LocalIP: "10.52.0.1/24", Addresses: []string{"fd52::1/64"}, MAC: "02:52:00:00:00:01", TxQLen: 500, Offloads: true}
+		LocalIP: "10.52.0.1/24", Addresses: []string{"fd52::1/64"}, MAC: "02:52:00:00:00:01", TxQLen: 500, Offloads: boolp(true)}
 	declare(t, netNS, cfg, 1400)
 	got := readIface(t, netNS, "eth1")
 	if got.mac != "02:52:00:00:00:01" || got.mtu != 1400 || got.txqlen != 500 || !got.offloads {
@@ -114,11 +117,49 @@ func TestDeclareFresh(t *testing.T) {
 		t.Errorf("eth1 alias %q, want its tag with the digests", got.alias)
 	}
 
-	// Without a declaration of them, the queue length is LINK_TXQUEUELEN and the offloads are off.
+	// Without a declaration of them, the queue length is LINK_TXQUEUELEN and the offloads the kernel's.
 	plain := wireutil.PodLinkConfig{PodName: "a", PeerPodName: "b", LinkUID: 2, KubeNs: "decl", LocalIntf: "eth2"}
 	declare(t, netNS, plain, 1450)
-	if got := readIface(t, netNS, "eth2"); got.txqlen != wireutil.GetLinkTxQLen() || got.offloads {
-		t.Errorf("eth2 = txqueuelen %d, offloads %t; want %d and off", got.txqlen, got.offloads, wireutil.GetLinkTxQLen())
+	if got := readIface(t, netNS, "eth2"); got.txqlen != wireutil.GetLinkTxQLen() || !got.offloads || !got.tso {
+		t.Errorf("eth2 = txqueuelen %d, checksum %t, segmentation %t; want %d and the kernel's offloads, on",
+			got.txqlen, got.offloads, got.tso, wireutil.GetLinkTxQLen())
+	}
+}
+
+// A pod end keeps the kernel's tx offloads unless its link says false; dropping false gives them back,
+// which is also what an end tagged by an image where absent meant off gets on its first pass, since
+// that tag holds the digest of false. In between they are the workload's.
+func TestDeclareOffloads(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	netNS := newNS(t)
+	cfg := wireutil.PodLinkConfig{PodName: "a", PeerPodName: "b", LinkUID: 6, KubeNs: "decl", LocalIntf: "eth1", Offloads: boolp(false)}
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); got.offloads || got.tso {
+		t.Fatalf("offloads: false left checksum %t, segmentation %t; want both off", got.offloads, got.tso)
+	}
+	cfg.Offloads = nil
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); !got.offloads || !got.tso {
+		t.Fatalf("with offloads dropped: checksum %t, segmentation %t; want the kernel's, on", got.offloads, got.tso)
+	}
+	in(t, netNS, "the workload switching them off", func() error {
+		h, err := ethtool.NewEthtool()
+		if err != nil {
+			return err
+		}
+		defer h.Close()
+		return h.Change("eth1", map[string]bool{"tx-checksum-ip-generic": false})
+	})
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); got.offloads {
+		t.Errorf("an unchanged declaration switched the workload's offloads back on")
+	}
+	cfg.Offloads = boolp(true)
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); !got.offloads || !got.tso {
+		t.Errorf("offloads: true left checksum %t, segmentation %t; want both on", got.offloads, got.tso)
 	}
 }
 

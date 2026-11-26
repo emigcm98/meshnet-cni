@@ -1,4 +1,4 @@
-// The link description and the offloads switched off are from openconfig/kne,
+// The link description and the offloads switched off by `offloads: false` are from openconfig/kne,
 // third_party/meshnet/utils/wireutil/veth.go at 5a1676c (Apache 2.0); the wiring itself is hostends.go.
 
 package wireutil
@@ -21,7 +21,7 @@ type PodLinkConfig struct {
 	Addresses   []string // CIDRs of the local end beyond LocalIP
 	MAC         string   // MAC of the local end, empty for the kernel's
 	TxQLen      int      // queue length of the local end, zero for LINK_TXQUEUELEN
-	Offloads    bool     // keep the kernel's tx offloads on the local end
+	Offloads    *bool    // tx offloads of the local end, on or off; nil keeps the kernel's
 	Unplugged   bool     // the cable pulled, as the local end declares it
 	Shaping     *Shaping // of the traffic the local end sends
 }

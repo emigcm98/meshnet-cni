@@ -149,7 +149,10 @@ func parsePodLinks(topo *unstructured.Unstructured) ([]wireutil.PodLinkConfig, e
 		addresses, _, _ := unstructured.NestedStringSlice(rl, "addresses")
 		mac, _, _ := unstructured.NestedString(rl, "mac")
 		txQLen, _, _ := unstructured.NestedInt64(rl, "txqueuelen")
-		offloads, _, _ := unstructured.NestedBool(rl, "offloads")
+		var offloads *bool
+		if on, found, err := unstructured.NestedBool(rl, "offloads"); found && err == nil {
+			offloads = &on
+		}
 		unplugged, _, _ := unstructured.NestedBool(rl, "unplugged")
 
 		links = append(links, wireutil.PodLinkConfig{
