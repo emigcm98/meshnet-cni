@@ -116,6 +116,8 @@ func ensureSegmenter(hostEnd string) error {
 		}
 		lout = l
 	}
+	// The exit hands the segments on through a backlog too, so it keeps each flow on one CPU as well.
+	ensureRPS(out)
 	return redirect(lout, he)
 }
 

@@ -75,7 +75,7 @@ func TestWriteMetrics(t *testing.T) {
 		if name != wireutil.HostEndName("lab", "r1", 7) {
 			return linkCounters{}, false
 		}
-		return linkCounters{rxBytes: 100, txBytes: 200, shapingDrops: 3}, true
+		return linkCounters{rxBytes: 100, txBytes: 200, shapingDrops: 3, rps: true}, true
 	}
 	var b strings.Builder
 	writeMetrics(&b, links, read)
@@ -86,6 +86,7 @@ func TestWriteMetrics(t *testing.T) {
 		`meshnet_link_receive_bytes_total{namespace="lab",pod="r1",interface="eth1",peer_pod="r2",uid="7"} 100`,
 		`meshnet_link_transmit_bytes_total{namespace="lab",pod="r1",interface="eth1",peer_pod="r2",uid="7"} 200`,
 		`meshnet_link_shaping_drops_total{namespace="lab",pod="r1",interface="eth1",peer_pod="r2",uid="7"} 3`,
+		`meshnet_link_rps{namespace="lab",pod="r1",interface="eth1",peer_pod="r2",uid="7"} 1`,
 		"# TYPE meshnet_link_receive_bytes_total counter",
 	} {
 		if !strings.Contains(out, want) {

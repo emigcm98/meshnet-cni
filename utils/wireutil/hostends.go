@@ -143,12 +143,14 @@ func EnsurePodEnd(e PodEnd) (bool, error) {
 		created, tempInPod = true, true
 	}
 
-	// The node end is the daemon's: always at HostEndMTU, which also lifts the node ends of 2.8.
+	// The node end is the daemon's: always at HostEndMTU, which also lifts the node ends of 2.8, and
+	// steering each flow to one CPU, which also reaches the node ends made before RPS.
 	if h, err := netlink.LinkByName(e.Host); err == nil && h.Attrs().MTU != HostEndMTU {
 		if err := netlink.LinkSetMTU(h, HostEndMTU); err != nil {
 			log.Warnf("EnsurePodEnd: failed to set MTU %d on node end %s: %v", HostEndMTU, e.Host, err)
 		}
 	}
+	ensureRPS(e.Host)
 
 	if !tempInPod {
 		return false, Declare(e.NetNS, e.Name, e.UID, e.Peer, e.Declared, false)

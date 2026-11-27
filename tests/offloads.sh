@@ -3,7 +3,9 @@
 # back when it stops saying it, live; with them on, one TCP stream carries well over twice what it
 # does with them off, on one node and across workers. And with them on, a loss in the shaping still
 # drops packets, not the frames of many segments they hand over: netem's drops against the segments
-# that reach the pod, from the daemon's metrics. o1 and o2 share worker A, o3 sits on worker B.
+# that reach the pod, from the daemon's metrics. The node ends' RPS, which keeps a flow in order
+# across nodes, is reported from the metrics too, and checked with EXPECT_RPS=1, since a kind node's
+# sysfs is read-only and leaves them without. o1 and o2 share worker A, o3 sits on worker B.
 # Usage: tests/offloads.sh [worker-a] [worker-b]; KUBECTL_CONTEXT picks the cluster.
 A=${1:-meshnet-worker}; B=${2:-meshnet-worker2}
 K="kubectl ${KUBECTL_CONTEXT:+--context $KUBECTL_CONTEXT}"
@@ -118,6 +120,12 @@ start o1 $A; start o2 $A; start o3 $B
 
 check "o1 eth1, on one node, keeps the kernel's offloads" eval 'is o1 eth1 on && is o2 eth1 on'
 check "o1 eth2, across workers, keeps the kernel's offloads" eval 'is o1 eth2 on && is o3 eth1 on'
+rps() { echo "$(metric $A o1 eth1 meshnet_link_rps)$(metric $A o2 eth1 meshnet_link_rps)$(metric $A o1 eth2 meshnet_link_rps)$(metric $B o3 eth1 meshnet_link_rps)"; }
+if [ "${EXPECT_RPS:-0}" = 1 ]; then
+  check "the four node ends steer each flow to one CPU (RPS)" eval '[ "$(rps)" = 1111 ]'
+else
+  echo "[INFO] RPS on the four node ends: $(rps) (1 each when set; EXPECT_RPS=1 makes it a check)"
+fi
 check "o1 reaches o2 and o3" eval "$K -n $NS exec o1 -- ping -c 1 -W 1 10.48.1.2 && $K -n $NS exec o1 -- ping -c 1 -W 1 10.48.2.3"
 same_on=$(mbps o1 10.48.1.2); across_on=$(mbps o1 10.48.2.3)
 
