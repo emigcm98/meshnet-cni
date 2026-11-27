@@ -35,13 +35,13 @@ const (
 type Declared struct {
 	Addresses []string // CIDRs of either family, local_ip first
 	MAC       string
-	MTU       int  // the link's, already settled between both ends
-	TxQLen    int  // the link's, or LINK_TXQUEUELEN
-	Offloads  bool // keep the kernel's tx offloads
+	MTU       int   // the link's, already settled between both ends
+	TxQLen    int   // the link's, or LINK_TXQUEUELEN
+	Offloads  *bool // the tx offloads on or off, nil for the kernel's
 	// Shaping of what the interface sends, for an uplink, which has no node end to carry it.
 	Shaping *Shaping
-	// uplink leaves the offloads as the kernel has them unless Offloads asks to keep them, since
-	// meshnet never switched an uplink's off, and puts the shaping on the interface itself.
+	// uplink puts the shaping on the interface itself, and never puts back the kernel's offloads,
+	// which for a macvlan depend on its parent.
 	uplink bool
 }
 
@@ -94,9 +94,17 @@ func (d Declared) Digests() Digests {
 		propMAC:       digest(strings.ToLower(d.MAC)),
 		propMTU:       digest(strconv.Itoa(d.MTU)),
 		propTxQLen:    digest(strconv.Itoa(d.TxQLen)),
-		propOffloads:  digest(strconv.FormatBool(d.Offloads)),
+		propOffloads:  digest(offloadsString(d.Offloads)),
 		propShaping:   digest(d.Shaping.String()),
 	}
+}
+
+// offloadsString is empty for the kernel's offloads, the digest of a property never declared.
+func offloadsString(on *bool) string {
+	if on == nil {
+		return ""
+	}
+	return strconv.FormatBool(*on)
 }
 
 func (g Digests) String() string {
@@ -196,12 +204,20 @@ func applyDeclared(l netlink.Link, d Declared, prev, cur Digests) error {
 			log.Warnf("Declare: failed to set txqueuelen %d on %s: %v", d.TxQLen, l.Attrs().Name, err)
 		}
 	}
-	if apply(propOffloads) && !(d.uplink && !d.Offloads) {
-		if h, _ := ethtool.NewEthtool(); h != nil {
-			if err := setTxOffload(h, l.Attrs().Name, d.Offloads); err != nil {
-				log.Warnf("Declare: failed to switch the tx offloads of %s %s: %v", l.Attrs().Name, onOff(d.Offloads), err)
+	if apply(propOffloads) {
+		// Absent, a fresh end keeps the kernel's; a pod end whose declaration dropped its offloads gets
+		// the kernel's back, which on a veth are all on.
+		on, touch := true, prev != nil && !d.uplink
+		if d.Offloads != nil {
+			on, touch = *d.Offloads, true
+		}
+		if touch {
+			if h, _ := ethtool.NewEthtool(); h != nil {
+				if err := setTxOffload(h, l.Attrs().Name, on); err != nil {
+					log.Warnf("Declare: failed to switch the tx offloads of %s %s: %v", l.Attrs().Name, onOff(on), err)
+				}
+				h.Close()
 			}
-			h.Close()
 		}
 	}
 	if apply(propShaping) && d.uplink {

@@ -278,7 +278,8 @@ func redirectsTo(f netlink.Filter, ifindex int) bool {
 	return ok && a.MirredAction == netlink.TCA_EGRESS_REDIR && a.Ifindex == ifindex
 }
 
-// JoinHostEnds joins two node ends of one node both ways.
+// JoinHostEnds joins two node ends of one node both ways, through the segmenting hop of a node end
+// that has one.
 func JoinHostEnds(a, b string) error {
 	la, err := netlink.LinkByName(a)
 	if err != nil {
@@ -288,14 +289,14 @@ func JoinHostEnds(a, b string) error {
 	if err != nil {
 		return fmt.Errorf("node end %s: %w", b, err)
 	}
-	if err := redirect(la, lb); err != nil {
+	if err := redirect(la, entryOf(lb)); err != nil {
 		return err
 	}
-	return redirect(lb, la)
+	return redirect(lb, entryOf(la))
 }
 
 // JoinVxlan joins a node end to the vxlan that carries its link to the peer's node, making or
-// re-pointing the vxlan as needed.
+// re-pointing the vxlan as needed; what arrives goes through the node end's segmenting hop if it has one.
 func JoinVxlan(hostEnd, vxName string, vni int, remote net.IP, parent string) error {
 	he, err := netlink.LinkByName(hostEnd)
 	if err != nil {
@@ -337,7 +338,7 @@ func JoinVxlan(hostEnd, vxName string, vni int, remote net.IP, parent string) er
 	if err := redirect(he, vx); err != nil {
 		return err
 	}
-	return redirect(vx, he)
+	return redirect(vx, entryOf(he))
 }
 
 // SetHostEndUp sets the admin state of a node end, which is the carrier its pod's interface sees.

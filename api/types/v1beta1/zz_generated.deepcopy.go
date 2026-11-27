@@ -31,6 +31,11 @@ func (in *Link) DeepCopyInto(out *Link) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.Offloads != nil {
+		in, out := &in.Offloads, &out.Offloads
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Shaping != nil {
 		in, out := &in.Shaping, &out.Shaping
 		*out = new(Shaping)

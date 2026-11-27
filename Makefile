@@ -109,6 +109,11 @@ shaping: wait-for-meshnet
 status: wait-for-meshnet
 	tests/status.sh
 
+.PHONY: offloads
+## Check the tx offloads of the pod ends: the kernel's by default, off and back live, what they buy a TCP stream, and loss per packet with them on
+offloads: wait-for-meshnet
+	tests/offloads.sh
+
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   
 	sleep 5

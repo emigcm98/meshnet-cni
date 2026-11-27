@@ -46,6 +46,15 @@ func TestMacvlanLifecycle(t *testing.T) {
 		t.Errorf("uplink eth1 = offloads %t, txqueuelen %d, mtu %d; want the kernel's %t, %d, %d",
 			got.offloads, got.txqlen, got.mtu, kernels.offloads, kernels.txqlen, kernels.mtu)
 	}
+	// A macvlan's offloads follow its parent, which the kernel does not let a macvlan on a dummy
+	// change, so declaring them off and dropping that again only has to go through.
+	off := cfg
+	off.Offloads = boolp(false)
+	for _, d := range []wireutil.PodLinkConfig{off, cfg} {
+		if err := wireutil.Declare(podNs.Path(), "eth1", 9, "localhost", wireutil.NewUplinkDeclared(d), false); err != nil {
+			t.Fatalf("Declare(offloads %v): %v", d.Offloads, err)
+		}
+	}
 	kind, exists, err := wireutil.LinkInfo(podNs.Path(), "eth1")
 	if err != nil || !exists || kind != "macvlan" {
 		t.Fatalf("after MakeMacvlan: kind %q, exists %t, err %v", kind, exists, err)

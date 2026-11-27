@@ -83,8 +83,9 @@ type Link struct {
 	MAC string `json:"mac,omitempty"`
 	// TxQueueLen of the local end; LINK_TXQUEUELEN when zero.
 	TxQueueLen int `json:"txqueuelen,omitempty"`
-	// Offloads keeps the kernel's tx offloads on the local end, which are switched off otherwise.
-	Offloads bool `json:"offloads,omitempty"`
+	// Offloads switches the tx offloads of the local end on (true) or off (false); absent, the end
+	// keeps the kernel's, which are on for a veth.
+	Offloads *bool `json:"offloads,omitempty"`
 	// Unplugged pulls the cable: both ends lose carrier and keep their configuration. Either end
 	// declaring it unplugs the link.
 	Unplugged bool `json:"unplugged,omitempty"`
