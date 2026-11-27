@@ -30,7 +30,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
-- A flow that leaves a pod through its node end keeps its order across nodes: every node end steers each flow to one CPU (RPS), where before a sender moving between CPUs had its flow drained by two at once and, on a NIC with a tx queue per CPU, reordered, hundreds of times per 10 s of one TCP stream across nodes. `NODE_END_RPS_CPUS` on the DaemonSet picks the CPUs, all online ones by default, and `meshnet_link_rps` tells the node ends that have it, since a read-only sysfs, as on kind, leaves them without.
+- A flow that leaves a pod through its node end keeps its order across nodes, for some tens of microseconds more of round trip: every node end steers each flow to one CPU (RPS), where before a sender moving between CPUs had its flow drained by two at once and, on a NIC with a tx queue per CPU, reordered, hundreds of times per 10 s of one TCP stream across nodes. `NODE_END_RPS_CPUS` on the DaemonSet picks the CPUs, all online ones by default, and `meshnet_link_rps` tells the node ends that have it, since a read-only sysfs, as on kind, leaves them without.
 
 - A pod recreated on its peer's worker gets its links: an end the peer kept towards the old worker, or one that stands alone, is remade instead of colliding on the rename, so `kubectl delete pod` of a cross-worker pod no longer leaves it stuck. `make eviction` runs in the CI.
 - `make install` and `make uninstall` use the kustomize the Makefile installs instead of one expected on the PATH.
