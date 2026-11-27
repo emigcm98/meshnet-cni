@@ -34,10 +34,13 @@ type linkCounters struct {
 	rxBytes, rxPackets, rxDrops uint64
 	txBytes, txPackets, txDrops uint64
 	shapingDrops                uint64
+	// rps says whether the node end steers each flow to one CPU, as the daemon wants it.
+	rps bool
 }
 
 // readNodeEnd reads the counters of a link from its node end: what the node end receives is what the
-// pod sent, and what it transmits is what the pod receives, after the shaping of its root qdisc.
+// pod sent, and what it transmits is what the pod receives, after the shaping of its root qdisc. Its
+// RPS is read from sysfs too, so a node where it could not be set shows it.
 func readNodeEnd(name string) (linkCounters, bool) {
 	l, err := netlink.LinkByName(name)
 	if err != nil || l.Attrs().Statistics == nil {
@@ -55,6 +58,7 @@ func readNodeEnd(name string) (linkCounters, bool) {
 			}
 		}
 	}
+	c.rps = wireutil.HasRPS(name, wireutil.RPSMask())
 	return c, true
 }
 
@@ -128,6 +132,17 @@ func writeMetrics(w io.Writer, podLinks map[string][]v1beta1.LinkStatus, read fu
 	fmt.Fprintln(w, "# TYPE meshnet_link_up gauge")
 	for _, r := range rows {
 		fmt.Fprintf(w, "meshnet_link_up%s %d\n", r.base, r.up)
+	}
+	fmt.Fprintln(w, "# HELP meshnet_link_rps Whether the link's node end steers each flow to one CPU (RPS), which keeps it in order across nodes.")
+	fmt.Fprintln(w, "# TYPE meshnet_link_rps gauge")
+	for _, r := range rows {
+		if r.counters != nil {
+			v := 0
+			if r.counters.rps {
+				v = 1
+			}
+			fmt.Fprintf(w, "meshnet_link_rps%s %d\n", r.base, v)
+		}
 	}
 	for _, f := range counterFamilies {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", f.name, f.help, f.name, f.kind)

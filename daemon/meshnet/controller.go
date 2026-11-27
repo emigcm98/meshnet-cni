@@ -939,6 +939,7 @@ func (m *Meshnet) RunControllerLoop(ctx context.Context) {
 	}
 	mnetdLogger.Infof("Topology informer cache synced successfully")
 	m.enqueueFullReconcile()
+	wireutil.RPSMask() // settled and logged once, before the first pass
 	go m.watchHostEnds(ctx)
 	go m.serveMetrics(ctx)
 	// The informer's resync reconciles every pod each minute; what a pod that left this node leaves
