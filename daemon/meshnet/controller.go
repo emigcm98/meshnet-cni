@@ -230,6 +230,9 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 	if err != nil {
 		return res, err
 	}
+	for i := range links {
+		links[i].DefaultMAC = wireutil.DerivedMAC(m.cluster(), links[i].KubeNs, links[i].PodName, links[i].LocalIntf)
+	}
 
 	// A link that left the spec goes first, from the pod and from the host, so its name is free for
 	// whatever replaces it in the same pass.
@@ -261,11 +264,7 @@ func (m *Meshnet) reconcilePodLinksInternal(ctx context.Context, topo *unstructu
 		// The external uplink: a macvlan on a node interface, with no peer pod to wait for and no
 		// node end, so it has no cable to unplug and carries its own shaping.
 		if link.PeerPodName == localhost {
-			created, err := wireutil.MakeMacvlan(netNS, link.LocalIntf, link.PeerIntf)
-			if err == nil {
-				err = wireutil.Declare(netNS, link.LocalIntf, link.LinkUID, link.PeerPodName, wireutil.NewUplinkDeclared(link), created)
-			}
-			if err != nil {
+			if _, err := wireutil.EnsureUplink(netNS, link.LocalIntf, link.PeerIntf, link.LinkUID, link.PeerPodName, wireutil.NewUplinkDeclared(link)); err != nil {
 				fail("failed to wire the uplink", err)
 				continue
 			}
@@ -827,9 +826,70 @@ func (m *Meshnet) ReconcileAllLocalPods(ctx context.Context) error {
 		return err
 	}
 	for _, u := range topos {
-		_ = m.ReconcilePodLinks(ctx, u)
+		m.reconcileAndRetry(ctx, u)
 	}
 	return nil
+}
+
+// retryDelays are how long after a pass that failed its pod is tried again, each try that fails one
+// step further; past the last the pod waits for the resync. Together they cover the 30 s the plugin
+// waits for a pod's interfaces.
+var retryDelays = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+
+// passRetry is where a pod whose passes fail is in retryDelays, in the netns it failed in, and whether
+// its next try is already set.
+type passRetry struct {
+	netNS   string
+	step    int
+	pending bool
+}
+
+// passDone notes how the pass over a pod ended and says whether, and when, to try again. One try is
+// set at a time, so the passes that events bring in between do not use the delays up, and a pod made
+// again starts over.
+func (m *Meshnet) passDone(key, netNS string, err error) (time.Duration, bool) {
+	m.retryMu.Lock()
+	defer m.retryMu.Unlock()
+	if err == nil {
+		delete(m.retries, key)
+		return 0, false
+	}
+	r := m.retries[key]
+	if r == nil || r.netNS != netNS {
+		if m.retries == nil {
+			m.retries = make(map[string]*passRetry)
+		}
+		r = &passRetry{netNS: netNS}
+		m.retries[key] = r
+	}
+	if r.pending || r.step >= len(retryDelays) {
+		return 0, false
+	}
+	r.pending = true
+	r.step++
+	return retryDelays[r.step-1], true
+}
+
+// retryDue queues the pod whose try has come.
+func (m *Meshnet) retryDue(key string) {
+	m.retryMu.Lock()
+	if r := m.retries[key]; r != nil {
+		r.pending = false
+	}
+	m.retryMu.Unlock()
+	m.enqueueReconcile(key)
+}
+
+// reconcileAndRetry reconciles a pod and, when the pass fails, tries again soon and not at the next
+// resync: what failed may be gone by then, as the MAC of an uplink that the sandbox the pod had still
+// holds, and the pod is waiting for its interfaces to start.
+func (m *Meshnet) reconcileAndRetry(ctx context.Context, topo *unstructured.Unstructured) {
+	err := m.ReconcilePodLinks(ctx, topo)
+	key := fmt.Sprintf("%s/%s", topo.GetNamespace(), topo.GetName())
+	_, netNS, _ := isPodActive(topo)
+	if after, ok := m.passDone(key, netNS, err); ok {
+		time.AfterFunc(after, func() { m.retryDue(key) })
+	}
 }
 
 // listTopologies returns every Topology from the cache, or from the API while the cache is empty.
@@ -873,7 +933,7 @@ func (m *Meshnet) runReconcileWorker(ctx context.Context) {
 					if err != nil || topo == nil {
 						continue
 					}
-					_ = m.ReconcilePodLinks(ctx, topo)
+					m.reconcileAndRetry(ctx, topo)
 				}
 			}
 		}
@@ -938,6 +998,7 @@ func (m *Meshnet) RunControllerLoop(ctx context.Context) {
 		return
 	}
 	mnetdLogger.Infof("Topology informer cache synced successfully")
+	m.settleCluster(ctx)
 	m.enqueueFullReconcile()
 	wireutil.RPSMask() // settled and logged once, before the first pass
 	go m.watchHostEnds(ctx)

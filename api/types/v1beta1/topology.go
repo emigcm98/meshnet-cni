@@ -79,7 +79,8 @@ type Link struct {
 	MTU int `json:"mtu,omitempty"`
 	// Addresses of the local end beyond LocalIP, of either family, in CIDR notation.
 	Addresses []string `json:"addresses,omitempty"`
-	// MAC of the local end; the kernel's random one when empty.
+	// MAC of the local end; when empty, one derived from the cluster, the namespace, the pod and the
+	// interface, so a pod made again keeps it.
 	MAC string `json:"mac,omitempty"`
 	// TxQueueLen of the local end; LINK_TXQUEUELEN when zero.
 	TxQueueLen int `json:"txqueuelen,omitempty"`

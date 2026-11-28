@@ -18,6 +18,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
+- A link end that declares no `mac` is born with one derived from the cluster (the UID of the `kube-system` namespace, which the daemon's ClusterRole now reads), its namespace, its pod and its interface, where it had a random one, so a pod made again on any node keeps its MACs and a neighbour that reaches it through a bridge no longer waits 20 to 35 s for its neighbour table to forget the old one. Ends that are there keep the MAC they have until they are made again, and an uplink gets its MAC before it comes up.
+- A pass over a pod that fails is tried again after 250 ms and at twice the wait each time, up to 16 s, where it waited for the next change or the minute's pass.
 - Links are made with netlink instead of koko; the link description and the offloads that `offloads: false` switches off come from KNE's meshnet (`wireutil/veth.go`).
 - Each end keeps the kernel's transmit offloads unless its link says `offloads: false`, where stock switched off the checksum offload of the veths within a node, which held a TCP stream to what one core could segment and checksum: about five times the throughput on one node.
 - The plugin only registers the pod with the daemon and waits up to 30 s for its interfaces, then lets the pod start; the controller and its tests come from KNE's meshnet. `status.skipped` is no longer read.

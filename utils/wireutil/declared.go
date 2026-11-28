@@ -35,9 +35,12 @@ const (
 type Declared struct {
 	Addresses []string // CIDRs of either family, local_ip first
 	MAC       string
-	MTU       int   // the link's, already settled between both ends
-	TxQLen    int   // the link's, or LINK_TXQUEUELEN
-	Offloads  *bool // the tx offloads on or off, nil for the kernel's
+	// DefaultMAC is the MAC of an end that declares none, given at its birth and when a declared one is
+	// dropped. It is outside the digests, so it never moves the MAC of an end that is there.
+	DefaultMAC string
+	MTU        int   // the link's, already settled between both ends
+	TxQLen     int   // the link's, or LINK_TXQUEUELEN
+	Offloads   *bool // the tx offloads on or off, nil for the kernel's
 	// Shaping of what the interface sends, for an uplink, which has no node end to carry it.
 	Shaping *Shaping
 	// uplink puts the shaping on the interface itself, and never puts back the kernel's offloads,
@@ -48,7 +51,7 @@ type Declared struct {
 // NewDeclared settles what cfg declares of its end: mtu is the link's, and the queue length falls
 // back to LINK_TXQUEUELEN.
 func NewDeclared(cfg PodLinkConfig, mtu int) Declared {
-	d := Declared{MAC: cfg.MAC, MTU: mtu, TxQLen: cfg.TxQLen, Offloads: cfg.Offloads}
+	d := Declared{MAC: cfg.MAC, DefaultMAC: cfg.DefaultMAC, MTU: mtu, TxQLen: cfg.TxQLen, Offloads: cfg.Offloads}
 	if cfg.LocalIP != "" {
 		d.Addresses = append(d.Addresses, cfg.LocalIP)
 	}
@@ -62,7 +65,7 @@ func NewDeclared(cfg PodLinkConfig, mtu int) Declared {
 // NewUplinkDeclared settles what cfg declares of an uplink: what it does not declare, its MTU, queue
 // length and offloads, stays the kernel's.
 func NewUplinkDeclared(cfg PodLinkConfig) Declared {
-	d := Declared{MAC: cfg.MAC, MTU: cfg.MTU, TxQLen: cfg.TxQLen, Offloads: cfg.Offloads, Shaping: cfg.Shaping, uplink: true}
+	d := Declared{MAC: cfg.MAC, DefaultMAC: cfg.DefaultMAC, MTU: cfg.MTU, TxQLen: cfg.TxQLen, Offloads: cfg.Offloads, Shaping: cfg.Shaping, uplink: true}
 	if cfg.LocalIP != "" {
 		d.Addresses = append(d.Addresses, cfg.LocalIP)
 	}
@@ -188,10 +191,16 @@ func applyDeclared(l netlink.Link, d Declared, prev, cur Digests) error {
 			return fmt.Errorf("failed to set MTU %d: %w", d.MTU, err)
 		}
 	}
-	if apply(propMAC) && d.MAC != "" {
-		mac, err := net.ParseMAC(d.MAC)
+	// An end that declares no MAC is born with its default one, and goes back to it when it drops the
+	// one it declared; an end that never declared one keeps the MAC it has.
+	want := d.MAC
+	if want == "" {
+		want = d.DefaultMAC
+	}
+	if apply(propMAC) && want != "" {
+		mac, err := net.ParseMAC(want)
 		if err != nil {
-			return fmt.Errorf("invalid MAC %q: %w", d.MAC, err)
+			return fmt.Errorf("invalid MAC %q: %w", want, err)
 		}
 		if l.Attrs().HardwareAddr.String() != mac.String() {
 			if err := netlink.LinkSetHardwareAddr(l, mac); err != nil {

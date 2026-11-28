@@ -51,7 +51,7 @@ spec:
                         type: string
                       type: array
                     mac:
-                      description: '(Optional) MAC address of the local end'
+                      description: '(Optional) MAC address of the local end; without it, one derived from the cluster, the namespace, the pod and the interface, which a pod made again keeps'
                       type: string
                       pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'
                     txqueuelen:

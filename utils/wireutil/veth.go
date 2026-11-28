@@ -19,7 +19,8 @@ type PodLinkConfig struct {
 	PeerIP      string   // Peer CIDR (e.g. "10.10.0.2/30")
 	MTU         int      // Interface MTU, zero when the link asks for none
 	Addresses   []string // CIDRs of the local end beyond LocalIP
-	MAC         string   // MAC of the local end, empty for the kernel's
+	MAC         string   // MAC of the local end, empty for DefaultMAC
+	DefaultMAC  string   // MAC the local end is born with when MAC is empty, DerivedMAC; empty for the kernel's
 	TxQLen      int      // queue length of the local end, zero for LINK_TXQUEUELEN
 	Offloads    *bool    // tx offloads of the local end, on or off; nil keeps the kernel's
 	Unplugged   bool     // the cable pulled, as the local end declares it
