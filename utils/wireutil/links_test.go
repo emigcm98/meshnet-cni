@@ -1,6 +1,7 @@
 package wireutil_test
 
 import (
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -32,14 +33,22 @@ func TestMacvlanLifecycle(t *testing.T) {
 	}
 	defer podNs.Close()
 
-	created, err := wireutil.MakeMacvlan(podNs.Path(), "eth1", parent)
-	if err != nil || !created {
-		t.Fatalf("MakeMacvlan: created %t, %v", created, err)
+	// A macvlan as the kernel makes it on this parent, to compare with.
+	refNs, err := testutils.NewNS()
+	if err != nil {
+		t.Fatalf("creating the netns: %v", err)
 	}
-	kernels := readIface(t, podNs, "eth1")
+	defer refNs.Close()
+	if err := netlink.LinkAdd(&netlink.Macvlan{LinkAttrs: netlink.LinkAttrs{Name: "mvref0", ParentIndex: parentIndex(t, parent), Namespace: netlink.NsFd(int(refNs.Fd()))},
+		Mode: netlink.MACVLAN_MODE_BRIDGE}); err != nil {
+		t.Fatalf("adding the reference macvlan: %v", err)
+	}
+	kernels := readIface(t, refNs, "mvref0")
+
 	cfg := wireutil.PodLinkConfig{LinkUID: 9, PeerPodName: "localhost", LocalIntf: "eth1", LocalIP: "192.0.2.1/24"}
-	if err := wireutil.Declare(podNs.Path(), "eth1", 9, "localhost", wireutil.NewUplinkDeclared(cfg), true); err != nil {
-		t.Fatalf("Declare: %v", err)
+	created, err := wireutil.EnsureUplink(podNs.Path(), "eth1", parent, 9, "localhost", wireutil.NewUplinkDeclared(cfg))
+	if err != nil || !created {
+		t.Fatalf("EnsureUplink: created %t, %v", created, err)
 	}
 	// What an uplink does not declare stays the kernel's.
 	if got := readIface(t, podNs, "eth1"); got.offloads != kernels.offloads || got.txqlen != kernels.txqlen || got.mtu != kernels.mtu {
@@ -57,7 +66,7 @@ func TestMacvlanLifecycle(t *testing.T) {
 	}
 	kind, exists, err := wireutil.LinkInfo(podNs.Path(), "eth1")
 	if err != nil || !exists || kind != "macvlan" {
-		t.Fatalf("after MakeMacvlan: kind %q, exists %t, err %v", kind, exists, err)
+		t.Fatalf("after EnsureUplink: kind %q, exists %t, err %v", kind, exists, err)
 	}
 	if err := podNs.Do(func(_ ns.NetNS) error {
 		l, err := netlink.LinkByName("eth1")
@@ -72,8 +81,8 @@ func TestMacvlanLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("inspecting eth1: %v", err)
 	}
-	if created, err := wireutil.MakeMacvlan(podNs.Path(), "eth1", parent); err != nil || created {
-		t.Fatalf("second MakeMacvlan must leave the existing one alone: created %t, %v", created, err)
+	if created, err := wireutil.EnsureUplink(podNs.Path(), "eth1", parent, 9, "localhost", wireutil.NewUplinkDeclared(cfg)); err != nil || created {
+		t.Fatalf("second EnsureUplink must leave the existing one alone: created %t, %v", created, err)
 	}
 
 	// An uplink has no node end: its shaping goes on the interface in the pod, and comes off with it.
@@ -137,5 +146,93 @@ func TestLinkTag(t *testing.T) {
 		if _, _, ok := wireutil.ParseLinkTag(alias); ok {
 			t.Errorf("ParseLinkTag(%q) took a foreign alias for a tag", alias)
 		}
+	}
+}
+
+func parentIndex(t *testing.T, parent string) int {
+	t.Helper()
+	l, err := netlink.LinkByName(parent)
+	if err != nil {
+		t.Fatalf("finding %s: %v", parent, err)
+	}
+	return l.Attrs().Index
+}
+
+// An uplink that declares no MAC is born with its default one, and up. A second one with that MAC on
+// the same parent, which is what a pod made again asks for while the sandbox it had is still there, is
+// refused by the kernel: the pass fails, leaves nothing behind and says the same each time, and the
+// next one with the first gone makes it.
+func TestUplinkDefaultMAC(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	parent := "mvtest1"
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: parent}}); err != nil {
+		t.Fatalf("adding the dummy parent: %v", err)
+	}
+	defer func() {
+		if l, err := netlink.LinkByName(parent); err == nil {
+			_ = netlink.LinkDel(l)
+		}
+	}()
+	if l, err := netlink.LinkByName(parent); err != nil || netlink.LinkSetUp(l) != nil {
+		t.Fatalf("setting the parent up: %v", err)
+	}
+	oldNs, newNs := newNS(t), newNS(t)
+	const derived = "02:55:00:00:00:01"
+	cfg := wireutil.PodLinkConfig{LinkUID: 10, PeerPodName: "localhost", LocalIntf: "eth1", LocalIP: "192.0.2.1/24", DefaultMAC: derived}
+	uplink := func(netNS ns.NetNS) (bool, error) {
+		return wireutil.EnsureUplink(netNS.Path(), "eth1", parent, 10, "localhost", wireutil.NewUplinkDeclared(cfg))
+	}
+	names := func(netNS ns.NetNS) []string {
+		var out []string
+		in(t, netNS, "listing the links", func() error {
+			links, err := netlink.LinkList()
+			for _, l := range links {
+				if l.Attrs().Name != "lo" {
+					out = append(out, l.Attrs().Name)
+				}
+			}
+			return err
+		})
+		return out
+	}
+
+	if created, err := uplink(oldNs); err != nil || !created {
+		t.Fatalf("EnsureUplink: created %t, %v", created, err)
+	}
+	got := readIface(t, oldNs, "eth1")
+	up := false
+	in(t, oldNs, "reading the uplink", func() error {
+		l, err := netlink.LinkByName("eth1")
+		if err == nil {
+			up = l.Attrs().Flags&net.FlagUp != 0
+		}
+		return err
+	})
+	if got.mac != derived || !up || !got.has("192.0.2.1/24") {
+		t.Fatalf("uplink eth1 = mac %s, up %t, addresses %v; want %s, up, with its address", got.mac, up, got.addrs, derived)
+	}
+
+	created, refused := uplink(newNs)
+	if refused == nil || created {
+		t.Fatalf("a second uplink with the MAC of one that is up was made: created %t, %v", created, refused)
+	}
+	if left := names(newNs); len(left) != 0 {
+		t.Fatalf("the refused uplink left %v behind", left)
+	}
+	// Refused again, it says the same: an error that changed with every pass would be written to the
+	// status every pass, and each write brings the next pass at once.
+	if _, again := uplink(newNs); again == nil || again.Error() != refused.Error() {
+		t.Fatalf("the second refusal reads %q, the first %q", again, refused)
+	}
+	if err := wireutil.RemoveLink(oldNs.Path(), "eth1"); err != nil {
+		t.Fatalf("removing the first uplink: %v", err)
+	}
+	if created, err := uplink(newNs); err != nil || !created {
+		t.Fatalf("EnsureUplink with the first gone: created %t, %v", created, err)
+	}
+	if got := readIface(t, newNs, "eth1"); got.mac != derived {
+		t.Errorf("uplink eth1 made again has %s, want %s", got.mac, derived)
 	}
 }

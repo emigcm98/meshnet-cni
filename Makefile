@@ -114,6 +114,11 @@ status: wait-for-meshnet
 offloads: wait-for-meshnet
 	tests/offloads.sh
 
+.PHONY: mac
+## Check that a pod made again, on its node and on the other, keeps its MACs, and that a neighbour behind a bridge reaches it at once
+mac: wait-for-meshnet
+	tests/mac.sh
+
 wait-for-meshnet:
 	kubectl wait --for condition=Ready pod -l name=meshnet -n meshnet   
 	sleep 5

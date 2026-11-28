@@ -885,3 +885,60 @@ func TestCleanupOrphanedSegmenters(t *testing.T) {
 		t.Errorf("the orphan pass removed %s, a dummy that only looks like a hop", lookalike)
 	}
 }
+
+// A pod made again comes back with the MAC it had: an end that declares none derives it from the
+// cluster, its namespace, its pod and its interface, so the neighbour, whose end is never remade,
+// still knows it. A daemon without the cluster's identity leaves the kernel's random one.
+func TestReconcileRemadeKeepsMAC(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	InitLogger()
+	nsA, nsB := newNS(t), newNS(t)
+	defer nsA.Close()
+	linkA := map[string]interface{}{"uid": int64(31), "peer_pod": "b", "local_intf": "eth1", "peer_intf": "eth1", "local_ip": "10.31.0.1/30"}
+	linkB := map[string]interface{}{"uid": int64(31), "peer_pod": "a", "local_intf": "eth1", "peer_intf": "eth1", "local_ip": "10.31.0.2/30"}
+	a := topologyWithLinks("a", "10.0.0.1", nsA.Path(), linkA)
+	b := topologyWithLinks("b", "10.0.0.1", nsB.Path(), linkB)
+	m := newTestMeshnet(t, a, b)
+	cluster := "4f2b9d6e-1c1a-4b55-9a57-0d2f6f2b7c11"
+	m.clusterID.Store(&cluster)
+	m.mustReconcile(t, a, b)
+	macOf := func(netNS ns.NetNS) string { return linkOf(netNS, "eth1").Attrs().HardwareAddr.String() }
+	wantA, wantB := wireutil.DerivedMAC(cluster, "default", "a", "eth1"), wireutil.DerivedMAC(cluster, "default", "b", "eth1")
+	if macOf(nsA) != wantA || macOf(nsB) != wantB || wantA == wantB {
+		t.Fatalf("born with %s and %s, want the derived %s and %s", macOf(nsA), macOf(nsB), wantA, wantB)
+	}
+	kept := linkIndex(t, nsA, "eth1")
+
+	// b is made again, twice.
+	last := nsB
+	for i := 0; i < 2; i++ {
+		removeNS(t, last, wireutil.HostEndName("default", "b", 31))
+		m.mustReconcile(t, topologyWithLinks("b", "", "", linkB), a)
+		last = newNS(t)
+		m.mustReconcile(t, topologyWithLinks("b", "10.0.0.1", last.Path(), linkB), a)
+		if got := macOf(last); got != wantB {
+			t.Fatalf("b made again (%d) has %s, want the %s it had", i+1, got, wantB)
+		}
+		if linkIndex(t, nsA, "eth1") != kept || macOf(nsA) != wantA {
+			t.Fatalf("a eth1 was remade or changed its MAC when b was made again")
+		}
+	}
+	if !udpReaches(t, nsA, last, "10.31.0.2") {
+		t.Fatalf("a datagram from a did not reach the b made again")
+	}
+	defer last.Close()
+
+	// Without the cluster's identity the end is born as before, with a MAC of the kernel's.
+	nsC, nsD := newNS(t), newNS(t)
+	defer nsC.Close()
+	defer nsD.Close()
+	c := topologyWithLinks("c", "10.0.0.1", nsC.Path(), map[string]interface{}{"uid": int64(32), "peer_pod": "d", "local_intf": "eth1", "peer_intf": "eth1"})
+	d := topologyWithLinks("d", "10.0.0.1", nsD.Path(), map[string]interface{}{"uid": int64(32), "peer_pod": "c", "local_intf": "eth1", "peer_intf": "eth1"})
+	m2 := newTestMeshnet(t, c, d)
+	m2.mustReconcile(t, c, d)
+	if got := macOf(nsC); got == wireutil.DerivedMAC(cluster, "default", "c", "eth1") || got == "" {
+		t.Errorf("c eth1 has %s without a cluster identity, want one of the kernel's", got)
+	}
+}

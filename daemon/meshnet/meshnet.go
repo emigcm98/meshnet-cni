@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
@@ -53,6 +54,11 @@ type Meshnet struct {
 	reconcileQueue *ReconcileQueue
 	// defaultMTU is what a link that asks for none gets: what a vxlan over nodeIntf carries.
 	defaultMTU int
+	// clusterID is the cluster's identity, part of the MAC of a link end that declares none.
+	clusterID atomic.Pointer[string]
+	// retries are the pods whose last pass failed, by key, for their next try.
+	retryMu sync.Mutex
+	retries map[string]*passRetry
 	// joins are the same-node joins by node end, for the carrier watcher.
 	joinsMu sync.Mutex
 	joins   map[string]hostJoin

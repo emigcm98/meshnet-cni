@@ -335,3 +335,67 @@ func udpSizeReaches(t *testing.T, from, to ns.NetNS, toIP string, size int) bool
 func setDontFragment(fd int) {
 	_ = unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_MTU_DISCOVER, unix.IP_PMTUDISC_DO)
 }
+
+// An end that declares no MAC is born with its default one, a declared one wins over it and gives way
+// to it when it is dropped, and an end that is there never moves to it: one born with the kernel's
+// MAC, or given one by its workload, keeps it until it is made again.
+func TestDeclareDefaultMAC(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges. Run test with sudo")
+	}
+	netNS := newNS(t)
+	const derived, declared, byHand = "02:54:00:00:00:01", "02:54:00:00:00:02", "02:54:00:00:00:03"
+
+	cfg := wireutil.PodLinkConfig{PodName: "a", PeerPodName: "b", LinkUID: 4, KubeNs: "decl", LocalIntf: "eth1", DefaultMAC: derived}
+	end := declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); got.mac != derived {
+		t.Fatalf("eth1 was born with %s, want its default %s", got.mac, derived)
+	}
+	// Made again, as when its pod is, it has the same.
+	if err := wireutil.RemoveHostLink(end.Host); err != nil {
+		t.Fatalf("removing the pair: %v", err)
+	}
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); got.mac != derived {
+		t.Errorf("eth1 made again has %s, want %s", got.mac, derived)
+	}
+	// The workload's MAC stays while the declaration does.
+	in(t, netNS, "the workload's MAC", func() error {
+		l, err := netlink.LinkByName("eth1")
+		if err != nil {
+			return err
+		}
+		mac, _ := net.ParseMAC(byHand)
+		return netlink.LinkSetHardwareAddr(l, mac)
+	})
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); got.mac != byHand {
+		t.Errorf("an unchanged declaration moved the workload's MAC to %s", got.mac)
+	}
+	// A declared MAC wins, live and at birth, and dropping it gives the default back.
+	cfg.MAC = declared
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); got.mac != declared {
+		t.Errorf("eth1 has %s after declaring %s", got.mac, declared)
+	}
+	born := wireutil.PodLinkConfig{PodName: "a", PeerPodName: "b", LinkUID: 5, KubeNs: "decl", LocalIntf: "eth2", MAC: declared, DefaultMAC: derived}
+	declare(t, netNS, born, 1450)
+	if got := readIface(t, netNS, "eth2"); got.mac != declared {
+		t.Errorf("eth2 was born with %s, want the declared %s", got.mac, declared)
+	}
+	cfg.MAC = ""
+	declare(t, netNS, cfg, 1450)
+	if got := readIface(t, netNS, "eth1"); got.mac != derived {
+		t.Errorf("eth1 has %s after dropping its MAC, want its default %s", got.mac, derived)
+	}
+
+	// An end born before there were default MACs, with the kernel's: a pass that has one leaves it.
+	old := wireutil.PodLinkConfig{PodName: "a", PeerPodName: "b", LinkUID: 6, KubeNs: "decl", LocalIntf: "eth3"}
+	declare(t, netNS, old, 1450)
+	kernels := readIface(t, netNS, "eth3").mac
+	old.DefaultMAC = derived
+	declare(t, netNS, old, 1450)
+	if got := readIface(t, netNS, "eth3"); got.mac != kernels {
+		t.Errorf("eth3, born with the kernel's %s, was moved to %s by a pass with a default MAC", kernels, got.mac)
+	}
+}

@@ -19,6 +19,13 @@ rules:
     resources:
     - events
     verbs: ["create", "patch", "update"]
+  # The cluster's identity, part of the MAC of a link end that declares none.
+  - apiGroups:
+    - ""
+    resources:
+    - namespaces
+    resourceNames: ["kube-system"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

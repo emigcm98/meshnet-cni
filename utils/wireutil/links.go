@@ -3,7 +3,6 @@ package wireutil
 import (
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
@@ -145,20 +144,33 @@ func RemoveLink(nsPath, name string) error {
 	})
 }
 
-// MakeMacvlan hangs a macvlan in bridge mode on the node interface parent and moves it into the
-// netns at nsPath as name, up, and returns whether it made it. A name already there is left as it is;
-// the declaration of the link is Declare's.
-func MakeMacvlan(nsPath, name, parent string) (bool, error) {
-	if _, exists, err := LinkInfo(nsPath, name); err != nil || exists {
+// EnsureUplink makes sure the netns at nsPath has the uplink name, a macvlan in bridge mode on the node
+// interface parent, declared as d, and returns whether it made it. A new one gets all of its
+// declaration under a temporary name before it takes its own and comes up, so it never shows on the
+// segment with another MAC than its own, and one that fails on the way is removed, for the next pass
+// to make again. A name already there is left as it is but for what its declaration changes.
+func EnsureUplink(nsPath, name, parent string, uid int64, peer string, d Declared) (bool, error) {
+	if _, exists, err := LinkInfo(nsPath, name); err != nil {
 		return false, err
+	} else if exists {
+		return false, Declare(nsPath, name, uid, peer, d, false)
 	}
 	parentLink, err := netlink.LinkByName(parent)
 	if err != nil {
 		return false, fmt.Errorf("failed to find the parent interface %s: %w", parent, err)
 	}
+	podNs, err := ns.GetNS(nsPath)
+	if err != nil {
+		return false, fmt.Errorf("could not open netns %s: %w", nsPath, err)
+	}
+	defer podNs.Close()
 
-	// Made under a temporary name on the node, since the final one may already be taken there.
-	tmp := fmt.Sprintf("mv-%08x", rand.Uint32())
+	// Made under a temporary name on the node, since the final one may already be taken there: one
+	// per netns and interface, so a pass that fails reports the same error every time, which the
+	// status then holds without a write per pass, and what a pass that died left is found and removed.
+	tmp := "mv-" + digest(nsPath+"/"+name)
+	_ = delLinkByName(tmp)
+	_ = podNs.Do(func(_ ns.NetNS) error { return delLinkByName(tmp) })
 	mv := &netlink.Macvlan{
 		LinkAttrs: netlink.LinkAttrs{Name: tmp, ParentIndex: parentLink.Attrs().Index},
 		Mode:      netlink.MACVLAN_MODE_BRIDGE,
@@ -170,29 +182,32 @@ func MakeMacvlan(nsPath, name, parent string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("cannot get %s: %w", tmp, err)
 	}
-	podNs, err := ns.GetNS(nsPath)
-	if err != nil {
-		_ = netlink.LinkDel(link)
-		return false, fmt.Errorf("could not open netns %s: %w", nsPath, err)
-	}
-	defer podNs.Close()
 	if err := netlink.LinkSetNsFd(link, int(podNs.Fd())); err != nil {
 		_ = netlink.LinkDel(link)
 		return false, fmt.Errorf("failed to move %s into netns %s: %w", tmp, nsPath, err)
 	}
-	return true, podNs.Do(func(_ ns.NetNS) error {
+	if err := Declare(nsPath, tmp, uid, peer, d, true); err != nil {
+		_ = podNs.Do(func(_ ns.NetNS) error { return delLinkByName(tmp) })
+		return false, err
+	}
+	err = podNs.Do(func(_ ns.NetNS) error {
 		l, err := netlink.LinkByName(tmp)
 		if err != nil {
 			return fmt.Errorf("failed to find %s inside netns %s: %w", tmp, nsPath, err)
 		}
 		if err := netlink.LinkSetName(l, name); err != nil {
+			_ = netlink.LinkDel(l)
 			return fmt.Errorf("failed to rename %s -> %s inside %s: %w", tmp, name, nsPath, err)
 		}
+		// The kernel refuses a MAC that another macvlan up on the parent has, which is what a pod made
+		// again finds while the sandbox it had is still there.
 		if err := netlink.LinkSetUp(l); err != nil {
+			_ = netlink.LinkDel(l)
 			return fmt.Errorf("failed to set %s up inside %s: %w", name, nsPath, err)
 		}
 		return nil
 	})
+	return err == nil, err
 }
 
 // EndState is what the daemon reports of an interface in a pod.
